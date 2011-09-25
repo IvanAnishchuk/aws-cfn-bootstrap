@@ -1,0 +1,158 @@
+#!/usr/bin/env python
+
+#==============================================================================
+# Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Amazon Software License (the "License"). You may not use
+# this file except in compliance with the License. A copy of the License is
+# located at
+#
+#       http://aws.amazon.com/asl/
+#
+# or in the "license" file accompanying this file. This file is distributed on
+# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
+# implied. See the License for the specific language governing permissions
+# and limitations under the License.
+#==============================================================================
+import cfnbootstrap
+from cfnbootstrap import update_hooks, util
+from cfnbootstrap.cfn_client import CloudFormationClient
+from optparse import OptionParser
+from optparse import OptionGroup
+import ConfigParser
+import logging
+import os
+import sched
+import time
+import sys
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
+parser = OptionParser()
+parser.add_option("-c", "--config", help="The configuration directory (default: /etc/cfn)",
+                  type="string", dest="config_path", default="/etc/cfn")
+parser.add_option("", "--no-daemon", help="Do not daemonize",
+                  dest="no_daemon", action="store_true")
+
+parser.add_option("-v", "--verbose", help="Enables verbose logging",
+                  action="store_true", dest="verbose")
+
+(options, args) = parser.parse_args()
+
+def main():
+    cfnbootstrap.configureLogging("DEBUG" if options.verbose else "INFO", output_file='/var/log/cfn-hup.log')
+    
+    if not options.config_path:
+        logging.error("Error: A configuration path must be specified")
+        parser.print_help(sys.stderr)
+        exit(1)
+        
+    if not os.path.isdir(options.config_path):
+        logging.error("Error: Could not find configuration at %s", options.config_path)
+        exit(1)
+    
+    main_conf_path = os.path.join(options.config_path, 'cfn-hup.conf')
+    if not os.path.isfile(main_conf_path):
+        logging.error("Error: could not find main configuation at %s", main_conf_path)
+        
+    main_config = ConfigParser.SafeConfigParser()
+    main_config.read(main_conf_path)
+    
+    if not main_config.has_option('main', 'stack'):
+        logging.error("Error: [main] section must contain stack option")
+        exit(1)
+        
+    if not main_config.has_option('main', 'credential-file'):
+        logging.error("Error: [main] section must contain credential-file option")
+        exit(1)
+    
+    try:
+        access_key, secret_key = util.extract_credentials(main_config.get('main', 'credential-file'))
+    except IOError, e:
+        logging.error("Error retrieving credentials from file:\n\t%s", e.strerror)
+        exit(1)
+    
+    additional_hooks_path = os.path.join(options.config_path, 'hooks.d')
+    additional_files = []
+    if os.path.isdir(additional_hooks_path):
+        for hook_file in os.listdir(additional_hooks_path):
+            if os.path.isfile(os.path.join(additional_hooks_path, hook_file)):
+                additional_files.append(os.path.join(additional_hooks_path, hook_file))
+        
+    hooks_config = ConfigParser.SafeConfigParser()
+    files_read = hooks_config.read([os.path.join(options.config_path, 'hooks.conf')] + additional_files)
+    
+    if not files_read:
+        logging.error("No hook configurations found at %s or %s.", os.path.join(options.config_path, 'hooks.conf'), additional_hooks_path)
+        exit(1)
+    
+    hooks = []
+     
+    for section in hooks_config.sections():
+        if not hooks_config.has_option(section, 'triggers'):
+            logging.error("No triggers specified for hook %s", section)
+            continue
+        
+        triggers = [s.strip() for s in hooks_config.get(section, 'triggers').split(',')]
+        
+        if not hooks_config.has_option(section, 'path'):
+            logging.error("No path specified for hook %s", section)
+            continue
+            
+        if not hooks_config.has_option(section, 'action'):
+            logging.error("No action specified for hook %s", section)
+            continue
+        
+        runas = None
+        if hooks_config.has_option(section, 'runas'):
+            runas = hooks_config.get(section, 'runas').strip()
+        
+        hooks.append(update_hooks.Hook(section, triggers, hooks_config.get(section, 'path').strip(), hooks_config.get(section, 'action'), runas))
+        
+    if not hooks:
+        logging.error("No valid hooks found")
+        exit(1)
+        
+    url = CloudFormationClient.endpointForRegion('us-east-1')
+    if main_config.has_option('main', 'url'):
+        url = main_config.get('main', 'url')
+    elif main_config.has_option('main', 'region'):
+        url = CloudFormationClient.endpointForRegion(main_config.get('main', 'region'))
+        
+    processor = update_hooks.HookProcessor(hooks, main_config.get('main', 'stack'), access_key, secret_key, url)
+    
+    if options.no_daemon:
+        processor.process()
+    else:
+        interval = 15
+        if main_config.has_option('main', 'interval'):
+            interval = main_config.getint('main', 'interval')
+            if interval < 1:
+                logging.error("Invalid interval (must be 1 minute or greater): %s", interval)
+                exit(1)
+        
+        s = sched.scheduler(time.time, time.sleep)
+        def do_process():
+            processor.process();
+            s.enter(interval * 60, 1, do_process, ())
+        do_process()
+        s.run()
+
+if options.no_daemon:
+    main()
+else:
+    try:
+        import daemon
+    except ImportError:
+        print >> sys.stderr, "Daemon library was not installed; please install python-daemon"
+        exit(1)
+        
+    try:
+        from daemon import pidlockfile
+    except ImportError:
+        from daemon import pidfile as pidlockfile
+        
+    with daemon.DaemonContext(pidfile=pidlockfile.TimeoutPIDLockFile('/var/run/cfn-hup.pid', 300)):
+        main()

@@ -1,0 +1,11 @@
+Metadata-Version: 1.1
+Name: aws-cfn-bootstrap
+Version: 1.0
+Summary: An EC2 bootstrapper for CloudFormation
+Home-page: http://aws.amazon.com/cloudformation/
+Author: AWS CloudFormation
+Author-email: UNKNOWN
+License: Amazon Software License
+Description: Bootstraps EC2 instances by retrieving and processing the Metadata block of a CloudFormation resource.
+Platform: UNKNOWN
+Requires: daemon
