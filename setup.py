@@ -18,7 +18,7 @@
 from distutils.core import setup
 import sys
 
-rpm_requires = ['python >= 2.5']
+rpm_requires = ['python >= 2.5', 'python-daemon']
 dependencies = ['daemon']
 if sys.version_info[0] == 2 and sys.version_info[1] == 5:
     rpm_requires.append('python-simplejson')

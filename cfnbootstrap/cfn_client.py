@@ -46,18 +46,12 @@ class CloudFormationClient(object):
 
     """
 
-    _regionToEndpoint = { "us-east-1" : "https://cloudformation.us-east-1.amazonaws.com",
-                         "us-west-1" : "https://cloudformation.us-west-1.amazonaws.com",
-                         "eu-west-1" : "https://cloudformation.eu-west-1.amazonaws.com",
-                         "ap-southeast-1" : "https://cloudformation.ap-southeast-1.amazonaws.com",
-                         "ap-northeast-1" : "https://cloudformation.ap-northeast-1.amazonaws.com" }
-
     _signatureVersion = 2;
     _apiVersion = "2010-05-15"
 
     def __init__(self, accessKey, secretKey, url=None):
         if not url:
-            self.endpoint = CloudFormationClient._regionToEndpoint["us-east-1"]
+            self.endpoint = CloudFormationClient.endpointForRegion('us-east-1')
         else:
             self.endpoint = url
         log.debug("Client initialized with endpoint %s", self.endpoint)
@@ -66,10 +60,7 @@ class CloudFormationClient(object):
 
     @classmethod
     def endpointForRegion(cls, region):
-        if not region in cls._regionToEndpoint:
-            raise KeyError("%s is not a supported region" % region)
-
-        return cls._regionToEndpoint[region]
+        return 'https://cloudformation.%s.amazonaws.com' % region
 
     def describe_stack_resource(self, logicalResourceId, stackName):
         """
