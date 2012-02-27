@@ -21,6 +21,7 @@ from cfnbootstrap.cfn_client import CloudFormationClient
 from cfnbootstrap.util import ProcessHelper
 import tempfile
 from cfnbootstrap import util
+import datetime
 try:
     import simplejson as json
 except ImportError:
@@ -29,6 +30,14 @@ except ImportError:
 log = logging.getLogger("cfn.hup")
 
 class UpdateError(Exception):
+
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return self.msg
+
+class InFlightStatusError(Exception):
 
     def __init__(self, msg):
         self.msg = msg
@@ -60,7 +69,7 @@ class Hook(object):
     @property
     def name(self):
         return self._name
-    
+
     @property
     def runas(self):
         return self._runas
@@ -71,7 +80,10 @@ class HookProcessor(object):
     def __init__(self, hooks, stack_name, access_key, secret_key, url):
         """Takes a list of Hook objects and processes them"""
         self.hooks = hooks
-        self.dir = '/var/lib/cfn-hup/data'
+        if os.name == 'nt':
+            self.dir = os.path.expandvars('${SystemDrive}\cfn\cfn-hup\data')
+        else:
+            self.dir = '/var/lib/cfn-hup/data'
         if not os.path.isdir(self.dir):
             log.debug("Creating %s", self.dir)
             try:
@@ -94,9 +106,12 @@ class HookProcessor(object):
                 except Exception:
                     log.exception("Exception caught while running hook %s", hook.name)
 
-
     def _process_hook(self, hook, shelf):
-        new_data = self._retrieve_path_data(hook.path)
+        try:
+            new_data = self._retrieve_path_data(hook.path)
+        except InFlightStatusError:
+            return
+
         old_data = shelf.get(hook.name + "|" + hook.path, None)
 
         if 'post.add' in hook.triggers and not old_data and new_data:
@@ -112,17 +127,18 @@ class HookProcessor(object):
 
         log.info("Running action for %s", hook.name)
         action_env = dict(os.environ)
+        env_key = self._retrieve_env_key(hook.path)
         if old_data:
-            action_env['CFN_OLD_METADATA'] = self._as_string(old_data)
+            action_env['CFN_OLD_%s' % env_key] = self._as_string(old_data)
         if new_data:
-            action_env['CFN_NEW_METADATA'] = self._as_string(new_data)
+            action_env['CFN_NEW_%s' % env_key] = self._as_string(new_data)
 
         action = hook.action
         if hook.runas:
             action = ['su', hook.runas, '-c', action]
-        
-        result = ProcessHelper(action, env=action_env).call()  
-                
+
+        result = ProcessHelper(action, env=action_env).call()
+
         if result.returncode:
             log.warn("Action for %s exited with %s; will retry on next iteration", hook.name, result.returncode)
         else:
@@ -132,17 +148,35 @@ class HookProcessor(object):
     def _as_string(self, obj):
         if isinstance(obj, basestring):
             return obj
+        elif isinstance(obj, datetime.datetime):
+            return obj.isoformat()
         return json.dumps(obj)
+
+    def _retrieve_env_key(self, path):
+        """Given a hook path, return the key to append to environment variables for old/new data"""
+        parts = path.split('.', 3)
+
+        if len(parts) < 3:
+            return 'LAST_UPDATED'
+        elif parts[2].lower() == 'metadata':
+            return 'METADATA'
+        elif parts[2].lower() == 'physicalresourceid':
+            return 'PHYSICAL_RESOURCE_ID'
 
     def _retrieve_path_data(self, path):
         parts = path.split('.', 3)
-        if len(parts) < 3:
-            raise UpdateError("Unsupported path: paths must be in the form Resources.<logical resource id>.Metadata(.<optional subkey>). Input: %s" % path)
+        if len(parts) < 2:
+            raise UpdateError("Unsupported path: paths must be in the form Resources.<LogicalResourceId>(.Metadata|PhysicalResourceId)(.<optional Metadata subkey>). Input: %s" % path)
 
         if parts[0].lower() != 'resources':
             raise UpdateError('Unsupported path: only changes to Resources are supported (path: %s)' % path)
-        if parts[2].lower() != 'metadata':
-            raise UpdateError('Unsupported path: only Metadata changes are supported (path: %s)' % path)
+
+        if len(parts) == 2:
+            resourcePart = None
+        elif parts[2].lower() not in ['metadata', 'physicalresourceid']:
+            raise UpdateError("Unsupported path: only Metadata or PhysicalResourceId can be specified after LogicalResourceId (path: %s)" % path)
+        else:
+            resourcePart = parts[2].lower()
 
         logical_id = parts[1]
         subpath = ('' if len(parts) < 4 else parts[3])
@@ -151,9 +185,21 @@ class HookProcessor(object):
             self._resource_cache[logical_id] = self.client.describe_stack_resource(logical_id, self.stack_name)
 
         resource = self._resource_cache[logical_id]
+        status = resource.resourceStatus
 
-        if not resource.metadata:
-            log.warn("No metadata for %s in %s", logical_id, self.stack_name)
+        if status and status.endswith('_IN_PROGRESS'):
+            log.debug("Skipping resource %s in %s as it is in status %s", logical_id, self.stack_name, status)
+            raise InFlightStatusError('%s in %s is in status %s' % (logical_id, self.stack_name, status))
+
+        if resourcePart == 'metadata':
+            if not resource.metadata:
+                log.warn("No metadata for %s in %s", logical_id, self.stack_name)
+                return None
+
+            return util.extract_value(resource.metadata, subpath)
+        elif 'DELETE_COMPLETE' == status:
             return None
-        
-        return util.extract_value(resource.metadata, subpath)
+        elif resourcePart == 'physicalresourceid':
+            return resource.physicalResourceId
+        else:
+            return resource.lastUpdated

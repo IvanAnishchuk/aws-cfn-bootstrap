@@ -35,17 +35,18 @@ class SourcesTool(object):
 
     _github_pattern = re.compile(r'^https?://github.com/.*?/(zipball|tarball)/.*$')
 
-    def apply(self, action):
+    def apply(self, action, auth_config):
         """
         Extract archives to their corresponding destination directories, returning directories which were updated.
-        
+
         Arguments:
         action -- a dict of directory to archive location, which can be either a path or URL
-        
+        auth_config -- an AuthenticationConfig object for managing authenticated downloads
+
         Exceptions:
         ToolError -- on expected failures
         """
-        
+
         dirs_changed = []
 
         if not action:
@@ -55,7 +56,7 @@ class SourcesTool(object):
         for (path, archive) in sorted(action.iteritems(), key=lambda pair: pair[0]):
 
             if archive.lower().startswith('http') or archive.lower().startswith('ftp'):
-                archive_file = self._archive_from_url(archive)
+                archive_file = self._archive_from_url(archive, auth_config)
             else:
                 if not os.path.isfile(archive):
                     raise ToolError("%s does not exist" % archive)
@@ -80,7 +81,7 @@ class SourcesTool(object):
             log.debug("Expanding %s into %s", archive, path)
             archive_wrapper.extract_all(path)
             dirs_changed.append(path)
-        
+
         return dirs_changed
 
     def _perform_github_magic(self, archive):
@@ -128,9 +129,9 @@ class SourcesTool(object):
             if prefix != normalized_parent:
                 raise ToolError("%s is not a sub-path of %s" % (member, path))
 
-    def _archive_from_url(self, archive):
+    def _archive_from_url(self, archive, auth_config):
         try:
-            urlstream = util.urlopen_withretry(archive)
+            urlstream = util.urlopen_withretry(archive, opener=auth_config.get_opener(None))
         except IOError, e:
             raise ToolError(e.strerror)
 

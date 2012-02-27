@@ -31,7 +31,7 @@ except ImportError:
 
 parser = OptionParser()
 creds_group = OptionGroup(parser, "AWS Credentials", "Options for specifying AWS Account Credentials. The credential file supercedes any other specification of credentials.")
-creds_group.add_option("-f", "--credential-file", help="A credential file, readable only by the owner, with keys 'AWSAccessKeyId' and 'AWSSecretKey'", 
+creds_group.add_option("-f", "--credential-file", help="A credential file, readable only by the owner, with keys 'AWSAccessKeyId' and 'AWSSecretKey'",
                        type="string", dest="credential_file")
 creds_group.add_option("", "--access-key", help="An AWS Access Key",
                        type="string", dest="access_key")
@@ -43,6 +43,9 @@ parser.add_option("-s", "--stack", help="A CloudFormation stack",
                   type="string", dest="stack_name")
 parser.add_option("-r", "--resource", help="A CloudFormation logical resource ID",
                   type="string", dest="logical_resource_id")
+
+parser.add_option("-c", "--configsets", help='An optional list of configSets (default: "default")',
+                  type="string", dest="configsets")
 
 parser.add_option("-u", "--url", help="The CloudFormation service URL",
                   type="string", dest="endpoint")
@@ -63,7 +66,7 @@ if not options.stack_name or not options.logical_resource_id:
     print >> sys.stderr, "Error: You must specify both a stack name and logical resource id"
     parser.print_help(sys.stderr)
     exit(1)
-    
+
 cfnbootstrap.configureLogging("DEBUG" if options.verbose else "INFO")
 
 if options.credential_file:
@@ -81,8 +84,12 @@ if options.endpoint:
     url = options.endpoint
 elif options.region:
     url = CloudFormationClient.endpointForRegion(options.region)
-  
-try:   
+
+configSets = ["default"]
+if options.configsets:
+    configSets = options.configsets.split(',')
+
+try:
     detail = CloudFormationClient(access_key, secret_key, url=url).describe_stack_resource(options.logical_resource_id, options.stack_name)
 except IOError, e:
     if e.strerror:
@@ -90,12 +97,15 @@ except IOError, e:
     else:
         print >> sys.stderr, "Unknown error retrieving %s" % options.logical_resource_id
     exit(1)
-    
+
 if not detail.metadata:
     print >> sys.stderr, "Error: %s does not specify any metadata" % detail.logicalResourceId
-    exit(1)    
+    exit(1)
 
-dir = '/var/lib/cfn-init/data'
+if os.name == 'nt':
+    dir = os.path.expandvars('${SystemDrive}\cfn\cfn-init\data')
+else:
+    dir = '/var/lib/cfn-init/data'
 if not os.path.isdir(dir) and not os.path.exists(dir):
     os.makedirs(dir)
 
@@ -107,8 +117,8 @@ else:
     logging.error("Could not create %s to store metadata", dir)
 
 if Contractor.metadataValid(detail.metadata):
-    try:    
-        Contractor(detail.metadata).build()
+    try:
+        Contractor(detail.metadata).build(configSets)
     except Exception, e:
         print >> sys.stderr, "Error occurred during build: %s" % str(e)
         logging.exception("Unhandled exception during build: %s", str(e))

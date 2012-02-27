@@ -40,6 +40,14 @@ class FileTool(object):
     _compare_buffer = 8*1024
 
     @classmethod
+    def is_same_file(cls, f1, f2):
+        if os.name == "posix":
+            return os.path.samefile(f1, f2)
+        else:
+            #Crude workaround for os.path.samefile only existing on Unix
+            return os.path.normcase(os.path.abspath(f1)) == os.path.normcase(os.path.abspath(f2))
+
+    @classmethod
     def compare_file_contents(cls, f1, f2):
         """
         Return true if f1 and f2 have the same content.
@@ -47,7 +55,7 @@ class FileTool(object):
         if os.path.getsize(f1) != os.path.getsize(f2):
             return False
 
-        if os.path.samefile(f1, f2):
+        if cls.is_same_file(f1, f2):
             return True
 
         # Borrowed from filecmp
@@ -62,12 +70,13 @@ class FileTool(object):
                     if not b1:
                         return True
 
-    def apply(self, action):
+    def apply(self, action, auth_config):
         """
         Write a set of files to disk, returning a list of the files that have changed.
 
         Arguments:
         action -- a dict of pathname to attributes, such as owner, group, mode, content, and encoding
+        auth_config -- an AuthenticationConfig object for managing authenticated downloads
 
         Exceptions:
         ToolError -- on expected failures
@@ -86,7 +95,7 @@ class FileTool(object):
             if file_is_link:
                 if "content" not in attribs:
                     raise ToolError("Symbolic link specified without a destination")
-                elif os.path.exists(filename) and os.path.samefile(os.path.realpath(filename), attribs["content"]):
+                elif os.path.exists(filename) and FileTool.is_same_file(os.path.realpath(filename), attribs["content"]):
                     log.info("Symbolic link %s already exists", filename)
                     continue
 
@@ -103,16 +112,16 @@ class FileTool(object):
                     log.debug("%s is specified as a symbolic link to %s", filename, attribs['content'])
                     os.symlink(attribs["content"], filename)
                 else:
-                    with file(filename, 'w') as f:
+                    with file(filename, 'wb') as f:
                         log.debug("Writing content to %s", filename)
-                        self._write_file(f, attribs)
+                        self._write_file(f, attribs, auth_config)
 
                 if "mode" in attribs:
                     log.debug("Setting mode for %s to %s", filename, attribs["mode"])
                     os.chmod(filename, stat.S_IMODE(int(attribs["mode"], 8)))
                 else:
                     log.debug("No mode specified for %s", filename)
-                    
+
                 security.set_owner_and_group(filename, attribs.get("owner"), attribs.get("group"))
 
         return files_changed
@@ -123,10 +132,8 @@ class FileTool(object):
         backup_backup_file = None
         if os.path.exists(filename):
             log.debug("%s already exists", filename)
-            if not os.path.isfile(filename):
-                raise ToolError("%s exists and is not a file" % filename)
             backup_file = filename + '.bak'
-            if os.path.isfile(backup_file):
+            if os.path.exists(backup_file):
                 backup_backup_file = backup_file + "2"
                 self._backup_file(backup_file, backup_backup_file)
             self._backup_file(filename, backup_file)
@@ -163,7 +170,7 @@ class FileTool(object):
             log.error("Could not move %s to %s", source, dest)
             raise ToolError("Could not rename %s: %s" % (source, str(e)))
 
-    def _write_file(self, dest, attribs):
+    def _write_file(self, dest, attribs, auth_config):
         content = attribs.get("content", "")
         if content:
             self._write_inline_content(dest, content, attribs.get("encoding", "plain") == "base64")
@@ -174,7 +181,8 @@ class FileTool(object):
             log.debug("Retrieving contents from %s", source)
 
             try:
-                remote_contents = util.urlopen_withretry(urllib2.Request(source, headers={'Accept-Encoding' : 'gzip'}))
+                remote_contents = util.urlopen_withretry(urllib2.Request(source, headers={'Accept-Encoding' : 'gzip'}),
+                                                            opener = auth_config.get_opener(attribs.get('authentication', None)))
             except IOError, e:
                 raise ToolError(e.strerror)
 

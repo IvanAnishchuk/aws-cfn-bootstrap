@@ -81,9 +81,9 @@ class CloudFormationClient(object):
             eDoc = json.load(e)['Error']
             code = eDoc['Code']
             terminal = e.code < 500 and code != 'Throttling'
-            return (terminal, "%s: %s" % (code, eDoc['Message']))
+            return (terminal, 'Throttling'==code or e.code==503, "%s: %s" % (code, eDoc['Message']))
         except (TypeError, AttributeError, KeyError):
-            return (e.code < 500, "Unknown Error: %s %s" % (e.code, e.msg))
+            return (e.code < 500, e.code==503, "Unknown Error: %s %s" % (e.code, e.msg))
 
     def _construct_url(self, inParams, verb="GET"):
         params = dict(inParams)
@@ -103,7 +103,7 @@ class CloudFormationClient(object):
 
         stringToSign += '&'.join(urllib.quote(k, safe='~') + '=' + urllib.quote(v, safe='~') for k, v in sorted(params.iteritems()))
 
-        return base64.b64encode(hmac.new(self.secretKey, stringToSign, hashlib.sha256).digest())
+        return base64.b64encode(hmac.new(self.secretKey.encode('utf-8'), stringToSign.encode('utf-8'), hashlib.sha256).digest())
 
 class StackResourceDetail(object):
     """Detailed information about a stack resource"""

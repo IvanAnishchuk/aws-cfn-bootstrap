@@ -18,7 +18,18 @@ import logging.config
 import os.path
 import sys
 
-def configureLogging(level='INFO', quiet=False, output_file='/var/log/cfn-init.log'):
+def _getLogFile(filename):
+    if os.name == 'nt':
+        logdir = os.path.expandvars('${SystemDrive}\cfn\log')
+        if not os.path.exists(logdir):
+            os.makedirs(logdir)
+        return logdir + os.path.sep + filename
+
+    return '/var/log/%s' % filename
+
+
+def configureLogging(level='INFO', quiet=False, filename='cfn-init.log'):
+    output_file=_getLogFile(filename)
     try:
         with file(os.path.dirname(__file__) + os.path.sep + 'logging.conf') as f:
             logging.config.fileConfig(f, {'conf_level' : level, 'conf_handler' : 'default', 'conf_file' : output_file})
@@ -27,5 +38,5 @@ def configureLogging(level='INFO', quiet=False, output_file='/var/log/cfn-init.l
             print >> sys.stderr, "Could not open %s for logging.  Using stderr instead." % output_file
         with file(os.path.dirname(__file__) + os.path.sep + 'logging.conf') as f:
             logging.config.fileConfig(f, {'conf_level' : level, 'conf_handler' : 'tostderr'})
-        
+
 configureLogging(quiet=True)

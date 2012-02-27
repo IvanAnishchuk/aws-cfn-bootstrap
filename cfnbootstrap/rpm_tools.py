@@ -17,6 +17,7 @@ from cfnbootstrap.util import ProcessHelper
 import logging
 from cfnbootstrap.construction_errors import ToolError
 import subprocess
+import re
 
 log = logging.getLogger("cfn.init")
 
@@ -49,47 +50,85 @@ class YumTool(object):
             log.error("Yum makecache failed. Output: %s", cache_result.stdout)
             raise ToolError("Could not create yum cache", cache_result.returncode)
 
-        pkg_specs = []
+        pkg_specs_to_upgrade = []
+        pkg_specs_to_downgrade = []
 
         for pkg_name in action:
             if action[pkg_name]:
                 if isinstance(action[pkg_name], basestring):
-                    pkg_keys = ['%s-%s' % (pkg_name, action[pkg_name])]
+                    pkg_ver = action[pkg_name]
                 else:
-                    pkg_keys = ['%s-%s' % (pkg_name, ver) if ver else pkg_name for ver in action[pkg_name]]
+                    # Yum only cares about one version anyway... so take the max specified version in the list
+                    pkg_ver = RpmTool.max_version(action[pkg_name])
             else:
-                pkg_keys = [pkg_name]
+                pkg_ver = None
 
-            pkgs_filtered = [pkg_key for pkg_key in pkg_keys if self._pkg_filter(pkg_key)]
-            if pkgs_filtered:
-                pkg_specs.extend(pkgs_filtered)
+            pkg_spec = '%s-%s' % (pkg_name, pkg_ver) if pkg_ver else pkg_name
+
+            if self._pkg_installed(pkg_spec):
+                # If the EXACT requested spec is installed, don't do anything
+                log.debug("%s will not be installed as it is already present", pkg_spec)
+            elif not self._pkg_available(pkg_spec):
+                # If the requested spec is not available, blow up
+                log.error("%s is not available to be installed", pkg_spec)
+                raise ToolError("Yum does not have %s available for installation" % pkg_spec)
+            elif not pkg_ver:
+                # If they didn't request a specific version, always upgrade
+                pkg_specs_to_upgrade.append(pkg_spec)
                 pkgs_changed.append(pkg_name)
+            else:
+                # They've requested a specific version that's available but not installed.
+                # Figure out if it's an upgrade or a downgrade
+                installed_version = RpmTool.get_package_version(pkg_name, False)[1]
+                if self._should_upgrade(pkg_ver, installed_version):
+                    pkg_specs_to_upgrade.append(pkg_spec)
+                    pkgs_changed.append(pkg_name)
+                else:
+                    log.debug("Downgrading to %s from installed version %s", pkg_spec, installed_version)
+                    pkg_specs_to_downgrade.append(pkg_spec)
+                    pkgs_changed.append(pkg_name)
 
-        if not pkg_specs:
+
+        if not pkgs_changed:
             log.debug("All yum packages were already installed")
             return []
 
-        log.debug("Installing %s via yum", pkg_specs)
+        if pkg_specs_to_upgrade:
+            log.debug("Installing/updating %s via yum", pkg_specs_to_upgrade)
 
-        result = ProcessHelper(['yum', '-y', 'install'] + pkg_specs).call()
+            result = ProcessHelper(['yum', '-y', 'install'] + pkg_specs_to_upgrade).call()
 
-        if result.returncode:
-            log.error("Yum failed. Output: %s", result.stdout)
-            raise ToolError("Could not successfully install yum packages", result.returncode)
+            if result.returncode:
+                log.error("Yum failed. Output: %s", result.stdout)
+                raise ToolError("Could not successfully install/update yum packages", result.returncode)
+
+        if pkg_specs_to_downgrade:
+            log.debug("Downgrading %s via yum", pkg_specs_to_downgrade)
+
+            result = ProcessHelper(['yum', '-y', 'downgrade'] + pkg_specs_to_downgrade).call()
+
+            if result.returncode:
+                log.error("Yum failed. Output: %s", result.stdout)
+                raise ToolError("Could not successfully downgrade yum packages", result.returncode)
+
 
         log.info("Yum installed %s", pkgs_changed)
 
         return pkgs_changed
 
-    def _pkg_filter(self, pkg):
-        if self._pkg_installed(pkg):
-            log.debug("%s will not be installed as it is already present", pkg)
-            return False
-        elif not self._pkg_available(pkg):
-            log.error("%s is not available to be installed", pkg)
-            raise ToolError("Yum does not have %s available for installation" % pkg)
-        else:
+
+    def _should_upgrade(self, requested_ver, installed_version):
+        # If they haven't requested a version, always install
+        if not requested_ver:
             return True
+        #Now we need to detect whether or not we need to upgrade
+        ver_cmp = RpmTool.compare_rpm_versions(requested_ver, installed_version)
+        if ver_cmp > 0:
+            log.debug("Requested version %s is greater than installed version %s, so we will upgrade", requested_ver, installed_version)
+            return True
+        else:
+            log.debug("Requested version %s is NOT greater than installed version %s, so we will NOT upgrade", requested_ver, installed_version)
+            return False
 
     def _pkg_installed(self, pkg):
         result = ProcessHelper(['yum', '-C', '-y', 'list', 'installed', pkg]).call()
@@ -97,7 +136,9 @@ class YumTool(object):
         return result.returncode == 0
 
     def _pkg_available(self, pkg):
-        result = ProcessHelper(['yum', '-C', '-y', 'list', 'available', pkg]).call()
+        # --showduplicates seems to be required to see downgradable versions when running yum non-interactively
+        # but not when running interactively -- but we rarely run interactively
+        result = ProcessHelper(['yum', '-C', '-y', '--showduplicates', 'list', 'available', pkg]).call()
 
         return result.returncode == 0
 
@@ -157,23 +198,109 @@ class RpmTool(object):
 
         return True
 
-    def _is_installed(self, pkg):
-        # Use rpm -qp to extract the name, version, release and arch in rpm-standard format from the RPM
-        # This works even for remote RPMs
-        query_result = ProcessHelper(['rpm', '-qp', '--queryformat', '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}', '--nosignature', pkg], stderr=subprocess.PIPE).call()
+    @classmethod
+    def get_package_version(cls, pkg, is_file=True):
+        """
+        Given the name of an installed package or package location, return a tuple of (name, version-release)
+        of either the installed package or the specified package location
+
+        Parameters:
+            - pkg: the package name/location
+            - is_file : if True, pkg refers to a package location; if False, the name of an installed package
+        """
+
+        query_mode = '-qp' if is_file else '-qa'
+
+        log.debug("Querying for version of package %s", pkg)
+
+        query_result = ProcessHelper(['rpm', query_mode, '--queryformat', '%{NAME}|%{VERSION}-%{RELEASE}', '--nosignature', pkg], stderr=subprocess.PIPE).call()
+
+        log.debug("RPM stdout: %s", query_result.stdout)
+        log.debug("RPM stderr: %s", query_result.stderr)
 
         if query_result.returncode:
-            # If there's an error, assume we have to install it (a failure there will be terminal)
             log.error("Could not determine package contained by rpm at %s", pkg)
-            log.debug("RPM output: %s", query_result.stderr)
+            return (None, None)
+
+        # The output from the command is just name|version-release
+        name, sep, version = query_result.stdout.strip().partition('|')
+
+        return (name, version)
+
+    @classmethod
+    def order_versions(cls, pkg_vers):
+        return sorted(pkg_vers, cmp=cls.compare_rpm_versions)
+
+    @classmethod
+    def max_version(cls, versions):
+        max_ver = None
+        for ver in versions:
+            if cls.compare_rpm_versions(max_ver, ver) < 0:
+                max_ver = ver
+
+        return max_ver
+
+    @classmethod
+    def compare_rpm_versions(cls, first_pkg, second_pkg):
+        """
+        Given two package versions in form VERSION-RELEASE, (-RELEASE optional), compare them
+        based on "newness" (where "greater than" equals "newer")
+        """
+
+        # Partition the RPM version strings into (VERSION, RELEASE)
+        first_fields = first_pkg.split('-', 1) if first_pkg else ()
+        second_fields = second_pkg.split('-', 1) if second_pkg else ()
+
+        # Compare VERSION and then RELEASE
+        for i in range(2):
+            # Build a list of wholly-alpha and wholly-numeric fields; treat non-alphanumeric sequences as separators
+            first_chars = re.findall('[a-zA-Z]+|[0-9]+', first_fields[i]) if i < len(first_fields) else []
+            second_chars = re.findall('[a-zA-Z]+|[0-9]+', second_fields[i]) if i < len(second_fields) else []
+
+            # Compare position by position
+            for j in range(min(len(first_chars), len(second_chars))):
+                c1 = first_chars[j]
+                c2 = second_chars[j]
+                if c1.isdigit():
+                    if c2.isdigit():
+                        # If both fields are numeric, compare based on int values
+                        int_cmp = cmp(int(c1), int(c2))
+                        if int_cmp:
+                            return int_cmp
+                    else:
+                        # If one is alpha and one is numeric, then numeric is "greater"
+                        return 1
+                elif c2.isdigit():
+                    # If one is alpha and one is numeric, then numeric is "greater"
+                    return -1
+                else:
+                    # If they're both strings, just compare lexicographically
+                    str_cmp = cmp(c1, c2)
+                    if str_cmp:
+                        return str_cmp
+
+            # If all of the intersecting fields match, the longer string is newer
+            len_cmp = cmp(len(first_chars), len(second_chars))
+            if len_cmp:
+                return len_cmp
+
+        # If both VERSION and RELEASE match for both RPMs, ignoring non-alphanumeric chars, they are equal
+        return 0
+
+    def _is_installed(self, pkg):
+        pkg_with_version = RpmTool.get_package_version(pkg)
+
+        if not pkg_with_version or not pkg_with_version[0]:
+            # If there's an error retrieving the version, assume we have to install it (a failure there will be terminal)
             return True
 
-        # The output from the command is just name-version-release.arch
-        query_output = query_result.stdout.strip()
+        pkg_spec = '-'.join(pkg_with_version) if pkg_with_version[1] else pkg_with_version[0]
 
         # rpm -q will try to find the specific RPM in the local system
         # --quiet will reduce this command to just an exit code
-        test_result = ProcessHelper(['rpm', '-q', '--quiet', query_output]).call()
+        test_result = ProcessHelper(['rpm', '-q', '--quiet', pkg_spec]).call()
 
         # if rpm -q returns 0, that means the package exists
         return test_result.returncode == 0
+
+

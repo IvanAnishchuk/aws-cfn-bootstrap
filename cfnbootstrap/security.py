@@ -13,11 +13,16 @@
 # and limitations under the License.
 #==============================================================================
 import os
+import logging
 
 def set_owner_and_group(filename, owner_name, group_name):
     logging.warn("Unsupported OS for setting owner/group: %s" % os.name)
 
+def create_or_modify_user(user_name, groups=[], homedir=None, uid=None):
+    logging.warn("Unsupported OS for user operations: %s", os.name)
+
+def create_group(group_name, gid=None):
+    logging.warn("Unsupported OS for group operations: %s", os.name)
+
 if os.name == "posix":
     from posix_security import *
-elif os.name == "nt":
-    from nt_security import *    

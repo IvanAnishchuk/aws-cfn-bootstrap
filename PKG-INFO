@@ -1,6 +1,6 @@
 Metadata-Version: 1.1
 Name: aws-cfn-bootstrap
-Version: 1.0
+Version: 1.1
 Summary: An EC2 bootstrapper for CloudFormation
 Home-page: http://aws.amazon.com/cloudformation/
 Author: AWS CloudFormation

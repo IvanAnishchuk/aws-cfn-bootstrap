@@ -25,7 +25,7 @@ if sys.version_info[0] == 2 and sys.version_info[1] == 5:
     dependencies.append('simplejson')
 
 name = 'aws-cfn-bootstrap'
-version = '1.0'
+version = '1.1'
 
 setup(
     name=name,

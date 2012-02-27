@@ -17,24 +17,54 @@ class BuildError(Exception):
     """
     Base exception for errors raised while building
     """
-    
+
     pass
-    
+
+class NoSuchConfigSetError(BuildError):
+    """
+    Exception signifying no config error with specified name exists
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return self.msg
+
+class NoSuchConfigurationError(BuildError):
+    """
+    Exception signifying no config error with specified name exists
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return self.msg
+
+class CircularConfigSetDependencyError(BuildError):
+    """
+    Exception signifying circular dependency in configSets
+    """
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return self.msg
+
 class ToolError(BuildError):
     """
     Exception raised by Tools when they cannot successfully change reality
-    
+
     Attributes:
     msg - a human-readable error message
     code - an error code, if applicable
     """
-    
+
     def __init__(self, msg, code=None):
         self.msg = msg
         self.code = code
-        
+
     def __str__(self):
         if (self.code):
             return '%s (return code %s)' % (self.msg, self.code)
         else:
-            return self.msg     
+            return self.msg

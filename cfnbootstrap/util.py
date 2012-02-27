@@ -46,10 +46,11 @@ def extract_credentials(path):
     if not os.path.isfile(path):
         raise IOError(None, "Credential file was not found at %s" % path)
 
-    mode = os.stat(path)[stat.ST_MODE]
+    if os.name == 'posix':
+        mode = os.stat(path)[stat.ST_MODE]
 
-    if stat.S_IRWXG & mode or stat.S_IRWXO & mode:
-        raise IOError(None, "Credential file cannot be accessible by group or other. Please chmod 600 the credential file.")
+        if stat.S_IRWXG & mode or stat.S_IRWXO & mode:
+            raise IOError(None, "Credential file cannot be accessible by group or other. Please chmod 600 the credential file.")
 
     access_key, secret_key = '', ''
     with file(path, 'r') as f:
@@ -85,32 +86,42 @@ def exponential_backoff(max_tries):
     """
     Returns a series of floating point numbers between 0 and 2^i-1 for i in 0 to max_tries
     """
-    return (random.random() * (2**i - 1) for i in range(0, max_tries))
+    return [random.random() * (2**i - 1) for i in range(0, max_tries)]
+
+def extend_backoff(durations):
+    """
+    Adds another exponential delay time to a list of delay times
+    """
+    durations.append(random.random() * (2**len(durations) - 1))
 
 def _extract_http_error(e):
-    return (e.code < 500, "HTTP Error %s : %s" % (e.code, e.msg))
+    return (e.code < 500, e.code==503, "HTTP Error %s : %s" % (e.code, e.msg))
 
-def urlopen_withretry(request_or_url, max_tries=5, http_error_extractor=_extract_http_error):
+_default_opener = urllib2.build_opener()
+
+def urlopen_withretry(request_or_url, max_tries=5, http_error_extractor=_extract_http_error, opener = _default_opener):
     """
     Exponentially retries up to max_tries to open request_or_url.
     Raises an IOError on failure
-    
-    http_error_extractor is a function that takes a urllib2.HTTPError and returns a tuple of
-    (is_terminal, message)
+
+    http_error_extractor is a function that takes a urllib2.HTTPError and returns a 3-tuple of
+    (is_terminal, is_ignorable, message)
     """
-    for i in exponential_backoff(max_tries):
+    durations = exponential_backoff(max_tries)
+    for i in durations:
         if i > 0:
             log.debug("Sleeping for %f seconds before retrying", i)
             time.sleep(i)
 
         try:
-            return urllib2.urlopen(request_or_url)
+            return opener.open(request_or_url)
         except urllib2.HTTPError, e:
-            terminal, lastMessage = http_error_extractor(e)
+            terminal, ignorable, lastMessage = http_error_extractor(e)
             if terminal:
                 raise IOError(None, lastMessage)
-            else:
-                log.error(lastMessage)
+            elif ignorable:
+                extend_backoff(durations)
+            log.error(lastMessage)
         except urllib2.URLError, u:
             log.error("URLError: %s", u.reason)
             lastMessage = u.reason
@@ -146,18 +157,20 @@ class ProcessHelper(object):
 
     """
 
-    def __init__(self, cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=None):
+    def __init__(self, cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=None, cwd=None):
         self._cmd = cmd
         self._stdout = stdout
         self._stderr = stderr
         self._env = env
+        self._cwd = cwd
 
     def call(self):
         """
         Calls the command, returning a tuple of (returncode, stdout, stderr)
         """
 
-        process = subprocess.Popen(self._cmd, stdout=self._stdout, stderr=self._stderr, shell=isinstance(self._cmd, basestring), env=self._env)
+        process = subprocess.Popen(self._cmd, stdout=self._stdout, stderr=self._stderr,
+                                   shell=isinstance(self._cmd, basestring), env=self._env, cwd=self._cwd)
         returnData = process.communicate()
 
         return ProcessResult(process.returncode, returnData[0], returnData[1])

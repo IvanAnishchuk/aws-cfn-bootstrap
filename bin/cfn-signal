@@ -18,6 +18,7 @@ from optparse import OptionParser
 import socket
 import urllib2
 import time
+import sys
 from cfnbootstrap import util
 try:
     import simplejson as json
@@ -40,15 +41,15 @@ if options.exit_code:
     signal_success = False
 elif options.success != "true":
     signal_success = False
-    
+
 if not args or not args[0]:
     print >> sys.stderr, "Error: No WaitConditionHandle URL specified"
     parser.print_help(sys.stderr)
     exit(1)
-    
+
 if not options.reason and not signal_success:
     options.reason="Configuration failed."
-    
+
 data = { 'Status': 'SUCCESS' if signal_success else 'FAILURE',
          'Reason' : options.reason,
          'Data' : options.data,

@@ -42,7 +42,7 @@ class SysVInitTool(object):
 
         for service, serviceProperties in action.iteritems():
             force_restart = self._detect_required_restart(serviceProperties, changes)
-            
+
             if "enabled" in serviceProperties:
                 self._set_service_enabled(service, util.interpret_boolean(serviceProperties["enabled"]))
             else:
@@ -64,22 +64,36 @@ class SysVInitTool(object):
                     log.debug("No need to modify running state of service %s", service)
             else:
                 log.debug("Not modifying running state of service %s", service)
-                
+
     def _detect_required_restart(self, serviceProperties, changes):
-        if 'files' in serviceProperties and 'files' in changes:
-            if frozenset(serviceProperties['files']) & frozenset(changes['files']):
-                return True
-        
-        if 'sources' in serviceProperties and 'sources' in changes:
-            if frozenset(serviceProperties['sources']) & frozenset(changes['sources']):
-                return True
-            
+        if self._list_type_change_occurred(serviceProperties, changes, 'files'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'sources'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'groups'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'users'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'commands'):
+            return True
+
         if 'packages' in serviceProperties and 'packages' in changes:
             for manager, pkg_list in changes['packages'].iteritems():
                 if manager in serviceProperties['packages']:
                     if frozenset(serviceProperties['packages'][manager]) & frozenset(pkg_list):
                         return True
-            
+
+        return False
+
+    def _list_type_change_occurred(self, serviceProperties, changes, key):
+        if key in serviceProperties and key in changes:
+            if frozenset(serviceProperties[key]) & frozenset(changes[key]):
+                return True
+
         return False
 
     def _restart_service(self, service):
@@ -137,7 +151,7 @@ class SysVInitTool(object):
         if not modifier:
             log.error("Could not enable %s, as chkconfig and update-rc.d were not available", service)
             return
-        
+
         log.debug("Setting service %s to %s", service, "enabled" if enabled else "disabled")
 
         modifier.set_service_enabled(service, enabled);
@@ -152,7 +166,7 @@ class SysVInitTool(object):
             self._cached_modifier = UpdateRcD()
         else:
             self._cached_modifier = None
-            
+
         log.debug("Using service modifier: %s", self._cached_modifier)
 
         return self._cached_modifier
@@ -169,8 +183,8 @@ class SysVInitTool(object):
                 self._service_runner = "/usr/sbin/service"
             else:
                 self._service_runner = None
-            
-            if self._service_runner:    
+
+            if self._service_runner:
                 log.debug("Using service runner: %s", self._service_runner)
             else:
                 log.debug("Running init scripts directly")
@@ -191,7 +205,7 @@ class Chkconfig(object):
     def __init__(self):
         #Leaving this open for multiple locations of chkconfig
         self._executable = Chkconfig._executable
-        
+
     def __str__(self, *args, **kwargs):
         return self._executable
 
