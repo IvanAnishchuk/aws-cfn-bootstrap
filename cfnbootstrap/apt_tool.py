@@ -1,20 +1,22 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
 
 from cfnbootstrap.util import ProcessHelper
 import logging
+import os
 from cfnbootstrap.construction_errors import ToolError
 import subprocess
 
@@ -26,7 +28,7 @@ class AptTool(object):
 
     """
 
-    def apply(self, action):
+    def apply(self, action, auth_config=None):
         """
         Install a set of packages via APT, returning the packages actually installed or updated.
 
@@ -71,7 +73,10 @@ class AptTool(object):
 
         log.info("Attempting to install %s via APT", pkg_specs)
 
-        result = ProcessHelper(['apt-get', '-q', '-y', 'install'] + pkg_specs).call()
+        env = dict(os.environ)
+        env['DEBIAN_FRONTEND'] = 'noninteractive'
+
+        result = ProcessHelper(['apt-get', '-q', '-y', 'install'] + pkg_specs, env=env).call()
 
         if result.returncode:
             log.error("apt-get failed. Output: %s", result.stdout)
@@ -100,19 +105,19 @@ class AptTool(object):
     def _pkg_installed(self, pkg, pkg_name):
         """
         Test if a package is installed (exact version match if version is specified), returning a boolean.
-        
+
         Arguments:
         pkg -- the full package specification (including version if specified) in pkg=version format
         pkg_name -- the name of the package
         """
-        
+
         result = ProcessHelper(['dpkg-query', '-f', '${Status}|${Package}=${Version}', '-W', pkg_name], stderr=subprocess.PIPE).call()
 
         if result.returncode or not result.stdout:
             return False
-        
+
         status,divider,spec = result.stdout.strip().partition('|')
-        
+
         if status.rpartition(" ")[2] != 'installed':
             return False
 

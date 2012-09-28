@@ -1,27 +1,71 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
-from __future__ import with_statement
-import subprocess
-import random
+from requests.exceptions import ConnectionError, HTTPError, Timeout, \
+    RequestException, SSLError
+import imp
 import logging
-import time
-import urllib2
 import os.path
+import random
 import re
+import requests
 import stat
+import subprocess
+import sys
+import time
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
 log = logging.getLogger("cfn.init")
+
+def main_is_frozen():
+    return (hasattr(sys, "frozen") or # new py2exe
+            hasattr(sys, "importers") # old py2exe
+            or imp.is_frozen("__main__")) # tools/freeze
+
+def get_cert():
+    if main_is_frozen():
+        return os.path.join(os.path.dirname(sys.executable), 'cacert.pem')
+    return True # True tells Requests to find its own cert
+
+def get_instance_identity_document():
+    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document').text.rstrip()
+
+def get_instance_identity_signature():
+    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature').text.rstrip()
+
+_instance_id = '__unset'
+
+def get_instance_id():
+    """
+    Attempt to retrieve an EC2 instance id, returning None if this is not EC2
+    """
+    global _instance_id
+    if _instance_id == '__unset':
+        try:
+            _instance_id = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2, config={'danger_mode' : True}).text.strip()
+        except RequestException:
+            log.exception("Exception retrieving InstanceId")
+            _instance_id =  None
+
+    return _instance_id
+
+def is_ec2():
+    return get_instance_id() != None
 
 _trues = frozenset([True, 1, 'true', 'yes', 'y', '1'])
 
@@ -94,39 +138,63 @@ def extend_backoff(durations):
     """
     durations.append(random.random() * (2**len(durations) - 1))
 
-def _extract_http_error(e):
-    return (e.code < 500, e.code==503, "HTTP Error %s : %s" % (e.code, e.msg))
-
-_default_opener = urllib2.build_opener()
-
-def urlopen_withretry(request_or_url, max_tries=5, http_error_extractor=_extract_http_error, opener = _default_opener):
-    """
-    Exponentially retries up to max_tries to open request_or_url.
-    Raises an IOError on failure
-
-    http_error_extractor is a function that takes a urllib2.HTTPError and returns a 3-tuple of
-    (is_terminal, is_ignorable, message)
-    """
-    durations = exponential_backoff(max_tries)
-    for i in durations:
-        if i > 0:
-            log.debug("Sleeping for %f seconds before retrying", i)
-            time.sleep(i)
-
-        try:
-            return opener.open(request_or_url)
-        except urllib2.HTTPError, e:
-            terminal, ignorable, lastMessage = http_error_extractor(e)
-            if terminal:
-                raise IOError(None, lastMessage)
-            elif ignorable:
-                extend_backoff(durations)
-            log.error(lastMessage)
-        except urllib2.URLError, u:
-            log.error("URLError: %s", u.reason)
-            lastMessage = u.reason
+def _extract_http_error(resp):
+    if resp.status_code == 503:
+        retry_mode='RETRIABLE_FOREVER'
+    elif resp.status_code < 500 and resp.status_code not in (404, 408):
+        retry_mode='TERMINAL'
     else:
-        raise IOError(None, lastMessage)
+        retry_mode='RETRIABLE'
+
+    return RemoteError(resp.status_code, "HTTP Error %s : %s" % (resp.status_code, resp.text), retry_mode)
+
+class RemoteError(IOError):
+
+    retry_modes = frozenset(['TERMINAL', 'RETRIABLE', 'RETRIABLE_FOREVER'])
+
+    def __init__(self, code, msg, retry_mode='RETRIABLE'):
+        super(RemoteError, self).__init__(code, msg)
+        if not retry_mode in RemoteError.retry_modes:
+            raise ValueError("Invalid retry mode: %s" % retry_mode)
+        self.retry_mode = retry_mode
+
+def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
+    def _decorate(f):
+        def _retry(*args, **kwargs):
+            durations = exponential_backoff(max_tries)
+            for i in durations:
+                if i > 0:
+                    log.debug("Sleeping for %f seconds before retrying", min(i, 20))
+                    time.sleep(min(i, 20))
+
+                try:
+                    return f(*args, **kwargs)
+                except SSLError, e:
+                    log.exception("SSLError")
+                    raise RemoteError(None, str(e), retry_mode='TERMINAL')
+                except ConnectionError, e:
+                    log.exception('ConnectionError')
+                    last_error = RemoteError(None, str(e))
+                except HTTPError, e:
+                    last_error = http_error_extractor(e.response)
+                    if last_error.retry_mode == 'TERMINAL':
+                        raise last_error
+                    elif last_error.retry_mode == 'RETRIABLE_FOREVER':
+                        extend_backoff(durations)
+
+                    log.exception(last_error.strerror)
+                except Timeout, e:
+                    log.exception('Timeout')
+                    last_error = RemoteError(None, str(e))
+            else:
+                raise last_error
+        return _retry
+    return _decorate
+
+def json_from_response(resp):
+    if hasattr(resp, 'json'):
+        return resp.json
+    return json.load(resp.raw)
 
 class ProcessResult(object):
     """

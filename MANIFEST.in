@@ -1,5 +1,4 @@
-include LICENSE.txt
-include NOTICE.txt
+include license/LICENSE.txt
+include license/NOTICE.txt
 include MANIFEST.in
-include cfnbootstrap/logging.conf
 include init/cfn-hup

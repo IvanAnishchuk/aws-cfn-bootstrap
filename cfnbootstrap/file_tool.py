@@ -1,29 +1,27 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
-from __future__ import with_statement
-import logging
+from cfnbootstrap import security, util
 from cfnbootstrap.construction_errors import ToolError
-import os
-import base64
-import stat
-import shutil
-from cfnbootstrap import util, security
-import urllib2
-import gzip
-import tempfile
 from contextlib import contextmanager
+import base64
+import logging
+import os
+import requests
+import shutil
+import stat
 try:
     import simplejson as json
 except ImportError:
@@ -41,7 +39,7 @@ class FileTool(object):
 
     @classmethod
     def is_same_file(cls, f1, f2):
-        if os.name == "posix":
+        if hasattr(os.path, "samefile"):
             return os.path.samefile(f1, f2)
         else:
             #Crude workaround for os.path.samefile only existing on Unix
@@ -170,10 +168,10 @@ class FileTool(object):
             log.error("Could not move %s to %s", source, dest)
             raise ToolError("Could not rename %s: %s" % (source, str(e)))
 
-    def _write_file(self, dest, attribs, auth_config):
+    def _write_file(self, dest_fileobj, attribs, auth_config):
         content = attribs.get("content", "")
         if content:
-            self._write_inline_content(dest, content, attribs.get("encoding", "plain") == "base64")
+            self._write_inline_content(dest_fileobj, content, attribs.get("encoding", "plain") == "base64")
         else:
             source = attribs.get("source", "")
             if not source:
@@ -181,16 +179,18 @@ class FileTool(object):
             log.debug("Retrieving contents from %s", source)
 
             try:
-                remote_contents = util.urlopen_withretry(urllib2.Request(source, headers={'Accept-Encoding' : 'gzip'}),
-                                                            opener = auth_config.get_opener(attribs.get('authentication', None)))
+                self._get_remote_file(source, auth_config.get_auth(attribs.get('authentication', None)), dest_fileobj)
             except IOError, e:
-                raise ToolError(e.strerror)
+                raise ToolError("Failed to retrieve %s: %s" % (source, e.strerror))
 
-            if remote_contents.info().get('Content-Encoding') == 'gzip':
-                self._write_gzip_response(remote_contents, dest)
-            else:
-                shutil.copyfileobj(remote_contents, dest)
-
+    @util.retry_on_failure()
+    def _get_remote_file(self, source, auth, dest):
+        remote_contents = requests.get(source,
+                                       auth=auth,
+                                       verify=util.get_cert(),
+                                       prefetch=False,
+                                       config={'danger_mode' : True})
+        shutil.copyfileobj(remote_contents.raw, dest)
 
     def _write_inline_content(self, dest, content, is_base64):
         if not isinstance(content, basestring):
@@ -206,16 +206,3 @@ class FileTool(object):
                 raise ToolError("Malformed base64: %s" % content)
 
         dest.write(content)
-
-    def _write_gzip_response(self, resp, dest):
-        with tempfile.TemporaryFile() as tf:
-            #We yank the file to disk before gzip decoding it, as
-            #The gzip decoder expects to get a real file (it uses tell())
-            #Whereas an HTTP response really can only be read from
-            shutil.copyfileobj(resp, tf)
-            tf.seek(0, 0)
-            gz = gzip.GzipFile(fileobj=tf, mode='r')
-            try:
-                shutil.copyfileobj(gz, dest)
-            finally:
-                gz.close()

@@ -3,20 +3,23 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
 import cfnbootstrap
 from cfnbootstrap import update_hooks, util
+from cfnbootstrap.aws_client import Credentials
 from cfnbootstrap.cfn_client import CloudFormationClient
+from cfnbootstrap.sqs_client import SQSClient
 from optparse import OptionParser
 from optparse import OptionGroup
 import ConfigParser
@@ -47,16 +50,14 @@ parser.add_option("-v", "--verbose", help="Enables verbose logging",
 (options, args) = parser.parse_args()
 
 def main():
-    cfnbootstrap.configureLogging("DEBUG" if options.verbose else "INFO", filename='cfn-hup.log')
-
     if not options.config_path:
         logging.error("Error: A configuration path must be specified")
         parser.print_help(sys.stderr)
-        exit(1)
+        sys.exit(1)
 
     if not os.path.isdir(options.config_path):
         logging.error("Error: Could not find configuration at %s", options.config_path)
-        exit(1)
+        sys.exit(1)
 
     main_conf_path = os.path.join(options.config_path, 'cfn-hup.conf')
     if not os.path.isfile(main_conf_path):
@@ -67,17 +68,18 @@ def main():
 
     if not main_config.has_option('main', 'stack'):
         logging.error("Error: [main] section must contain stack option")
-        exit(1)
+        sys.exit(1)
 
-    if not main_config.has_option('main', 'credential-file'):
-        logging.error("Error: [main] section must contain credential-file option")
-        exit(1)
+    stack = main_config.get('main', 'stack')
 
-    try:
-        access_key, secret_key = util.extract_credentials(main_config.get('main', 'credential-file'))
-    except IOError, e:
-        logging.error("Error retrieving credentials from file:\n\t%s", e.strerror)
-        exit(1)
+    if main_config.has_option('main', 'credential-file'):
+        try:
+            access_key, secret_key = util.extract_credentials(main_config.get('main', 'credential-file'))
+        except IOError, e:
+            logging.error("Error retrieving credentials from file:\n\t%s", e.strerror)
+            sys.exit(1)
+    else:
+        access_key, secret_key = ('', '')
 
     additional_hooks_path = os.path.join(options.config_path, 'hooks.d')
     additional_files = []
@@ -91,9 +93,10 @@ def main():
 
     if not files_read:
         logging.error("No hook configurations found at %s or %s.", os.path.join(options.config_path, 'hooks.conf'), additional_hooks_path)
-        exit(1)
+        sys.exit(1)
 
     hooks = []
+    cmd_hooks = []
 
     for section in hooks_config.sections():
         if not hooks_config.has_option(section, 'triggers'):
@@ -114,45 +117,106 @@ def main():
         if hooks_config.has_option(section, 'runas'):
             runas = hooks_config.get(section, 'runas').strip()
 
-        hooks.append(update_hooks.Hook(section, triggers, hooks_config.get(section, 'path').strip(), hooks_config.get(section, 'action'), runas))
+        hook = update_hooks.Hook(section,
+                                 triggers,
+                                 hooks_config.get(section, 'path').strip(),
+                                 hooks_config.get(section, 'action'),
+                                 runas)
+        if hook.is_cmd_hook():
+            if hooks_config.has_option(section, 'singleton'):
+                hook.singleton = util.interpret_boolean(hooks_config.get(section, 'singleton'))
+            if hooks_config.has_option(section, 'send_result'):
+                hook.send_result = util.interpret_boolean(hooks_config.get(section, 'send_result'))
+            cmd_hooks.append(hook)
+        else:
+            hooks.append(hook)
 
-    if not hooks:
+    if not hooks and not cmd_hooks:
         logging.error("No valid hooks found")
-        exit(1)
+        sys.exit(1)
 
-    url = CloudFormationClient.endpointForRegion('us-east-1')
+    region = 'us-east-1'
+    if main_config.has_option('main', 'region'):
+        region = main_config.get('main', 'region')
+
+    cfn_url = CloudFormationClient.endpointForRegion(region)
+
     if main_config.has_option('main', 'url'):
-        url = main_config.get('main', 'url')
-    elif main_config.has_option('main', 'region'):
-        url = CloudFormationClient.endpointForRegion(main_config.get('main', 'region'))
+        cfn_url = main_config.get('main', 'url')
 
-    processor = update_hooks.HookProcessor(hooks, main_config.get('main', 'stack'), access_key, secret_key, url)
+    cfn_client = CloudFormationClient(Credentials(access_key, secret_key), cfn_url, region)
+
+    if hooks:
+        processor = update_hooks.HookProcessor(hooks, stack, cfn_client)
+    else:
+        processor = None
+
+    if cmd_hooks:
+        sqs_url = SQSClient.endpointForRegion(region)
+        if main_config.has_option('main', 'sqs_url'):
+            sqs_url = main_config.get('main', 'sqs_url')
+
+        sqs_client = SQSClient(Credentials(access_key, secret_key), sqs_url)
+
+        cmd_processor = update_hooks.CmdProcessor(stack, cmd_hooks, sqs_client,
+                                                  CloudFormationClient(Credentials(access_key, secret_key), cfn_url, region))
+    else:
+        cmd_processor = None
 
     if options.no_daemon:
-        processor.process()
+        if processor:
+            processor.process()
+        if cmd_processor:
+            cmd_processor.process()
     else:
         interval = 15
         if main_config.has_option('main', 'interval'):
             interval = main_config.getint('main', 'interval')
             if interval < 1:
                 logging.error("Invalid interval (must be 1 minute or greater): %s", interval)
-                exit(1)
+                sys.exit(1)
 
         s = sched.scheduler(time.time, time.sleep)
         def do_process():
-            processor.process();
+            try:
+                processor.process()
+            except update_hooks.FatalUpdateError, e:
+                logging.exception("Fatal exception")
+                sys.exit(1)
+            except Exception, e:
+                logging.exception("Unhandled exception")
             s.enter(interval * 60, 1, do_process, ())
-        do_process()
+        def do_cmd_process():
+            delay = 1
+            try:
+                if not cmd_processor.is_registered():
+                    cmd_processor.register()
+                if cmd_processor.creds_expired():
+                    log.error("Expired credentials found; skipping process")
+                    delay = 20
+                else:
+                    cmd_processor.process()
+            except update_hooks.FatalUpdateError, e:
+                logging.exception("Fatal exception")
+                sys.exit(1)
+            except Exception, e:
+                logging.exception("Unhandled exception")
+            s.enter(delay, 1, do_cmd_process, ())
+        if processor:
+            do_process()
+        if cmd_processor:
+            do_cmd_process()
         s.run()
 
 if options.no_daemon:
+    cfnbootstrap.configureLogging("DEBUG" if options.verbose else "INFO", filename='cfn-hup.log')
     main()
 else:
     try:
         import daemon
     except ImportError:
         print >> sys.stderr, "Daemon library was not installed; please install python-daemon"
-        exit(1)
+        sys.exit(1)
 
     try:
         from daemon import pidlockfile
@@ -160,4 +224,9 @@ else:
         from daemon import pidfile as pidlockfile
 
     with daemon.DaemonContext(pidfile=pidlockfile.TimeoutPIDLockFile('/var/run/cfn-hup.pid', 300)):
-        main()
+        cfnbootstrap.configureLogging("DEBUG" if options.verbose else "INFO", filename='cfn-hup.log')
+        try:
+            main()
+        except Exception, e:
+            logging.exception("Unhandled exception: %s", str(e))
+            sys.exit(1)

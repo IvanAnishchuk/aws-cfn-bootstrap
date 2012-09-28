@@ -1,34 +1,32 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
 """
 CloudFormation client-related classes
 
 Classes:
-CloudFormationClient - an HTTP client that makes API calls against CloudFormation endpoints
+CloudFormationClient - an HTTP client that makes API calls against CloudFormation
 StackResourceDetail  - detailed information about a StackResource
 
 """
+from cfnbootstrap import aws_client, util
+from cfnbootstrap.aws_client import CFNSigner, V4Signer
+from cfnbootstrap.util import retry_on_failure
 import datetime
-import urlparse
-import urllib
-import urllib2
-import hashlib
-import hmac
-import base64
 import logging
-from cfnbootstrap import util
+import re
 try:
     import simplejson as json
 except ImportError:
@@ -36,9 +34,9 @@ except ImportError:
 
 log = logging.getLogger("cfn.client")
 
-class CloudFormationClient(object):
+class CloudFormationClient(aws_client.Client):
     """
-    Makes API calls against known CloudFormation endpoints.
+    Makes API calls against CloudFormation
 
     Notes:
     - Public methods of this class have a 1-to-1 equivalence to published CloudFormation APIs.
@@ -46,70 +44,134 @@ class CloudFormationClient(object):
 
     """
 
-    _signatureVersion = 2;
     _apiVersion = "2010-05-15"
 
-    def __init__(self, accessKey, secretKey, url=None):
+    def __init__(self, credentials, url=None, region='us-east-1'):
+
         if not url:
-            self.endpoint = CloudFormationClient.endpointForRegion('us-east-1')
+            endpoint = CloudFormationClient.endpointForRegion(region)
         else:
-            self.endpoint = url
-        log.debug("Client initialized with endpoint %s", self.endpoint)
-        self.accessKey = accessKey
-        self.secretKey = secretKey
+            endpoint = url
+
+        self._using_instance_identity = (not credentials or not credentials.access_key) and util.is_ec2()
+
+        if not self._using_instance_identity:
+            if not region:
+                region = CloudFormationClient.regionForEndpoint(endpoint)
+
+            if not region:
+                raise ValueError('Region is required for AWS V4 Signatures')
+
+        signer = CFNSigner() if self._using_instance_identity else V4Signer(region, 'cloudformation')
+
+        super(CloudFormationClient, self).__init__(credentials, True, endpoint, signer)
+
+        log.debug("CloudFormation client initialized with endpoint %s", endpoint)
 
     @classmethod
     def endpointForRegion(cls, region):
         return 'https://cloudformation.%s.amazonaws.com' % region
 
-    def describe_stack_resource(self, logicalResourceId, stackName):
+    @classmethod
+    def regionForEndpoint(cls, endpoint):
+        match = re.match(r'https://cloudformation.([\w\d-]+).amazonaws.com', endpoint)
+        if match:
+            return match.group(1)
+        log.warn("Non-standard CloudFormation endpoint: %s", endpoint)
+        return None
+
+    @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    def describe_stack_resource(self, logicalResourceId, stackName, request_credentials=None):
         """
         Calls DescribeStackResource and returns a StackResourceDetail object.
 
         Throws an IOError on failure.
         """
-        url = self._construct_url({"Action" : "DescribeStackResource", "LogicalResourceId" : logicalResourceId,
-                                                      "StackName": stackName})
-
         log.debug("Describing resource %s in stack %s", logicalResourceId, stackName)
 
-        return StackResourceDetail(util.urlopen_withretry(urllib2.Request(url, headers={"Accept" : "application/json"}),
-                                                          http_error_extractor=self._extractErrorMessage))
+        return StackResourceDetail(self._call({"Action" : "DescribeStackResource",
+                                                           "LogicalResourceId" : logicalResourceId,
+                                                           "ContentType" : "JSON",
+                                                           "StackName": stackName,
+                                                           "Version": CloudFormationClient._apiVersion },
+                                                           request_credentials=request_credentials))
 
-    def _extractErrorMessage(self, e):
-        try :
-            eDoc = json.load(e)['Error']
-            code = eDoc['Code']
-            terminal = e.code < 500 and code != 'Throttling'
-            return (terminal, 'Throttling'==code or e.code==503, "%s: %s" % (code, eDoc['Message']))
-        except (TypeError, AttributeError, KeyError):
-            return (e.code < 500, e.code==503, "Unknown Error: %s %s" % (e.code, e.msg))
+    @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    def register_listener(self, stack_name, listener_id=None, request_credentials=None):
+        """
+        Calls RegisterListener and returns a Listener object
 
-    def _construct_url(self, inParams, verb="GET"):
-        params = dict(inParams)
+        Throws an IOError on failure.
+        """
+        log.debug("Registering listener %s for stack %s", listener_id, stack_name)
 
-        params["SignatureVersion"] = str(CloudFormationClient._signatureVersion)
-        params["Version"] = CloudFormationClient._apiVersion
-        params["AWSAccessKeyId"] = self.accessKey
-        params["Timestamp"] = datetime.datetime.utcnow().replace(microsecond=0).isoformat()
-        params["SignatureMethod"] = "HmacSHA256"
-        params["ContentType"] = "JSON"
-        params["Signature"] = self._sign(verb, params)
+        params = {"Action" : "RegisterListener",
+                  "StackName" : stack_name,
+                  "ContentType" : "JSON"}
 
-        return self.endpoint + "/?" + '&'.join(urllib.quote(k) + '=' + urllib.quote(v) for k, v in params.iteritems())
+        if not self._using_instance_identity:
+            params["ListenerId"] = listener_id
 
-    def _sign(self, verb, params):
-        stringToSign = verb + '\n' + urlparse.urlsplit(self.endpoint)[1] + '\n/\n'
+        return Listener(self._call(params, request_credentials = request_credentials))
 
-        stringToSign += '&'.join(urllib.quote(k, safe='~') + '=' + urllib.quote(v, safe='~') for k, v in sorted(params.iteritems()))
+    @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    def elect_command_leader(self, stack_name, command_name, invocation_id, listener_id=None, request_credentials=None):
+        """
+        Calls ElectCommandLeader and returns the listener id of the leader
 
-        return base64.b64encode(hmac.new(self.secretKey.encode('utf-8'), stringToSign.encode('utf-8'), hashlib.sha256).digest())
+        Throws an IOError on failure.
+        """
+        log.debug("Attempting to elect '%s' as leader for stack: %s, command: %s, invocation: %s",
+                  listener_id, stack_name, command_name, invocation_id)
+
+        params = {"Action" : "ElectCommandLeader",
+                  "CommandName" : command_name,
+                  "InvocationId" : invocation_id,
+                  "StackName" : stack_name,
+                  "ContentType" : "JSON"}
+
+        if not self._using_instance_identity:
+            params["ListenerId"] = listener_id
+
+        result_data = util.json_from_response(self._call(params, request_credentials = request_credentials))
+
+        return result_data['ElectCommandLeaderResponse']['ElectCommandLeaderResult']['ListenerId']
+
+    @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    def get_listener_credentials(self, stack_name, listener_id=None, request_credentials=None):
+        """
+        Calls GetListenerCredentials and returns a Credentials object
+
+        Throws an IOError on failure.
+        """
+        log.debug("Get listener credentials for listener %s in stack %s", listener_id, stack_name)
+
+        params = {"Action" : "GetListenerCredentials",
+                  "StackName" : stack_name,
+                  "ContentType" : "JSON"}
+
+        if not self._using_instance_identity:
+            params["ListenerId"] = listener_id
+
+        return aws_client.Credentials.from_response(self._call(params, request_credentials = request_credentials))
+
+
+class Listener(object):
+    """Result of RegisterListener"""
+
+    def __init__(self, resp):
+        result = util.json_from_response(resp)['RegisterListenerResponse']['RegisterListenerResult']
+        self._queue_url = result['QueueUrl']
+
+    @property
+    def queue_url(self):
+        return self._queue_url
 
 class StackResourceDetail(object):
     """Detailed information about a stack resource"""
 
-    def __init__(self, xmlData):
-        detail = json.load(xmlData)['DescribeStackResourceResponse']['DescribeStackResourceResult']['StackResourceDetail']
+    def __init__(self, resp):
+        detail = util.json_from_response(resp)['DescribeStackResourceResponse']['DescribeStackResourceResult']['StackResourceDetail']
 
         self._description = detail.get('Description')
         self._lastUpdated = datetime.datetime.utcfromtimestamp(detail['LastUpdatedTimestamp'])

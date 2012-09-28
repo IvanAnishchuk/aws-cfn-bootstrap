@@ -1,29 +1,31 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
-from __future__ import with_statement
-import logging
-from cfnbootstrap.construction_errors import ToolError
-import os.path
-import tarfile
-from tarfile import TarError
 from cfnbootstrap import util
+from cfnbootstrap.construction_errors import ToolError
+from cfnbootstrap.util import retry_on_failure
+from tarfile import TarError
 from zipfile import BadZipfile
-import zipfile
-import tempfile
-import shutil
+import logging
+import os.path
 import re
+import requests
+import shutil
+import tarfile
+import tempfile
+import zipfile
 
 log = logging.getLogger("cfn.init")
 
@@ -33,6 +35,7 @@ class SourcesTool(object):
 
     """
 
+    _remote_pattern = re.compile(r'^(https?|ftp)://.*$', re.I)
     _github_pattern = re.compile(r'^https?://github.com/.*?/(zipball|tarball)/.*$')
 
     def apply(self, action, auth_config):
@@ -55,8 +58,11 @@ class SourcesTool(object):
 
         for (path, archive) in sorted(action.iteritems(), key=lambda pair: pair[0]):
 
-            if archive.lower().startswith('http') or archive.lower().startswith('ftp'):
-                archive_file = self._archive_from_url(archive, auth_config)
+            if SourcesTool._remote_pattern.match(archive):
+                try:
+                    archive_file = self._archive_from_url(archive, auth_config)
+                except IOError, e:
+                    raise ToolError("Failed to retrieve %s: %s" % (archive, e.strerror))
             else:
                 if not os.path.isfile(archive):
                     raise ToolError("%s does not exist" % archive)
@@ -129,15 +135,16 @@ class SourcesTool(object):
             if prefix != normalized_parent:
                 raise ToolError("%s is not a sub-path of %s" % (member, path))
 
+    @retry_on_failure()
     def _archive_from_url(self, archive, auth_config):
-        try:
-            urlstream = util.urlopen_withretry(archive, opener=auth_config.get_opener(None))
-        except IOError, e:
-            raise ToolError(e.strerror)
-
         tf = tempfile.TemporaryFile()
-        shutil.copyfileobj(urlstream, tf)
-        tf.seek(0, 0)
+        remote_contents = requests.get(archive,
+                                       auth=auth_config.get_auth(None),
+                                       verify=util.get_cert(),
+                                       prefetch=False,
+                                       config={'danger_mode' : True})
+        shutil.copyfileobj(remote_contents.raw, tf)
+        tf.seek(0, os.SEEK_SET)
         return tf
 
 class ZipWrapper(object):

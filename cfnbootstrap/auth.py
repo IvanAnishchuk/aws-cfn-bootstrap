@@ -1,25 +1,24 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
-import logging
-import datetime
+from requests.auth import AuthBase, HTTPBasicAuth
 import base64
-import hmac
-import urllib2
+import datetime
 import hashlib
-from urllib2 import BaseHandler, HTTPBasicAuthHandler,\
-    HTTPPasswordMgrWithDefaultRealm
+import hmac
+import logging
 import re
 import urlparse
 
@@ -31,32 +30,35 @@ class S3Signer(object):
         self._access_key = access_key
         self._secret_key = secret_key
 
-    def signRequest(self, req):
-        if not req.has_header('Date'):
-            req.add_header('X-Amz-Date', datetime.datetime.utcnow().replace(microsecond=0).strftime("%a, %d %b %Y %H:%M:%S GMT"))
+    def sign(self, req):
+        if 'Date' not in req.headers:
+            req.headers['X-Amz-Date'] = datetime.datetime.utcnow().replace(microsecond=0).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-        stringToSign = req.get_method() + '\n' + \
-                       req.get_header('Content-md5', '') + '\n' + \
-                       req.get_header('Content-type', '') + '\n' + \
-                       req.get_header('Date', '') + '\n' + \
-                       self._canonicalize_headers(req) + '\n' + \
-                       self._canonicalize_resource(req)
+        stringToSign = req.method + '\n'
+        stringToSign += req.headers.get('content-md5', '') + '\n'
+        stringToSign += req.headers.get('content-type', '') + '\n'
+        stringToSign += req.headers.get('date', '') + '\n'
+        stringToSign += self._canonicalize_headers(req)
+        stringToSign += self._canonicalize_resource(req)
 
         signed = base64.encodestring(hmac.new(self._secret_key.encode('utf-8'), stringToSign.encode('utf-8'), hashlib.sha1).digest()).strip()
 
-        req.add_header('Authorization', 'AWS %s:%s' % (self._access_key, signed))
+        req.headers['Authorization'] = 'AWS %s:%s' % (self._access_key, signed)
 
         return req
 
     def _canonicalize_headers(self, req):
-        """Does a lazy canonicalization of the headers; it would be difficult to have two headers with the same key given the internals of urllib2.Request"""
-        return '\n'.join([hdr.lower() + ':' + val for hdr, val in sorted(req.header_items()) if hdr.lower().startswith('x-amz')])
+        headers = [(hdr.lower(), val) for hdr, val in req.headers.iteritems() if hdr.lower().startswith('x-amz')]
+        return '\n'.join([hdr + ':' + val for hdr, val in sorted(headers)]) + '\n' if headers else ''
 
     def _canonicalize_resource(self, req):
-        """Does a lazy canonicalization of the resource; will not detect ?acl or ?torrent"""
-        return urlparse.urlparse(req.get_full_url()).path
+        url = urlparse.urlparse(req.full_url)
+        match = re.match(r'^([^\.]+)\.s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
+        if match:
+            return '/' + match.group(1) + url.path
+        return url.path
 
-class S3DefaultHandler(BaseHandler):
+class S3DefaultAuth(AuthBase):
 
     def __init__(self):
         self._bucketToSigner = {}
@@ -64,20 +66,14 @@ class S3DefaultHandler(BaseHandler):
     def add_creds_for_bucket(self, bucket, access_key, secret_key):
         self._bucketToSigner[bucket] = S3Signer(access_key, secret_key)
 
-    def http_request(self, req):
+    def __call__(self, req):
         bucket = self._extract_bucket(req)
         if bucket and bucket in self._bucketToSigner:
-            return self._bucketToSigner[bucket].signRequest(req)
-        return req
-
-    def https_request(self, req):
-        bucket = self._extract_bucket(req)
-        if bucket and bucket in self._bucketToSigner:
-            return self._bucketToSigner[bucket].signRequest(req)
+            return self._bucketToSigner[bucket].sign(req)
         return req
 
     def _extract_bucket(self, req):
-        url = urlparse.urlparse(req.get_full_url())
+        url = urlparse.urlparse(req.full_url)
         match = re.match(r'^([^\.]+\.)?s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
         if not match:
             # Not an S3 URL, skip
@@ -90,62 +86,69 @@ class S3DefaultHandler(BaseHandler):
             # lop off the first / and return everything up to the next /
             return url.path[1:].partition('/')[0]
 
-class S3Handler(BaseHandler):
+class S3Auth(AuthBase):
 
     def __init__(self, access_key, secret_key):
         self._signer = S3Signer(access_key, secret_key)
 
-    def http_request(self, req):
-        return self._signer.signRequest(req)
+    def __call__(self, req):
+        return self._signer.sign(req)
 
-    def https_request(self, req):
-        return self._signer.signRequest(req)
+class BasicDefaultAuth(AuthBase):
 
+    def __init__(self):
+        self._auths = {}
 
-class BasicHandler(BaseHandler):
+    def __call__(self, req):
+        base_uri = urlparse.urlparse(req.full_url).netloc
+        if base_uri in self._auths:
+            return self._auths[base_uri](req)
+        return req
 
-    def __init__(self, username, password):
-        self._username = username
-        self._password = password
+    def add_password(self, uri, username, password):
+        self._auths[uri] = HTTPBasicAuth(username, password)
 
-    def http_request(self, req):
-        self._signRequest(req)
+class DefaultAuth(AuthBase):
 
-    def https_request(self, req):
-        self._signRequest(req)
+    def __init__(self, s3, basic):
+        self._s3 = s3
+        self._basic = basic
 
-    def _signRequest(self, req):
-        req.add_header('Authorization',  'Basic ' + base64.encodestring('%s:%s' % (self._username, self._password)).strip())
-
+    def __call__(self, req):
+        return self._s3(self._basic(req))
 
 class AuthenticationConfig(object):
 
     def __init__(self, model):
 
-        self._openers = {}
+        self._auths = {}
 
-        s3Handler = S3DefaultHandler()
-        basicHandler = HTTPBasicAuthHandler(HTTPPasswordMgrWithDefaultRealm())
+        s3Auth = S3DefaultAuth()
+        basicAuth = BasicDefaultAuth()
 
         for key, config in model.iteritems():
             configType = config.get('type', '')
             if 's3' == configType.lower():
-                self._openers[key] = urllib2.build_opener(S3Handler(config.get('accessKeyId'), config.get('secretKey')))
+                self._auths[key] = S3Auth(config.get('accessKeyId'), config.get('secretKey'))
                 if 'buckets' in config:
                     buckets = [config['buckets']] if isinstance(config['buckets'], basestring) else config['buckets']
                     for bucket in buckets:
-                        s3Handler.add_creds_for_bucket(bucket, config.get('accessKeyId'), config.get('secretKey'))
+                        s3Auth.add_creds_for_bucket(bucket, config.get('accessKeyId'), config.get('secretKey'))
             elif 'basic' == configType.lower():
-                self._openers[key] = urllib2.build_opener(BasicHandler(config.get('username'), config.get('password')))
+                self._auths[key] = HTTPBasicAuth(config.get('username'), config.get('password'))
                 if 'uris' in config:
-                    basicHandler.add_password(None, config['uris'], config.get('username'), config.get('password'))
+                    if isinstance(config['uris'], basestring):
+                        basicAuth.add_password(config['uris'], config.get('username'), config.get('password'))
+                    else:
+                        for u in config['uris']:
+                            basicAuth.add_password(u, config.get('username'), config.get('password'))
             else:
                 log.warn("Unrecognized authentication type: %s", configType)
 
-        self._defaultOpener = urllib2.build_opener(s3Handler, basicHandler)
+        self._defaultAuth = DefaultAuth(s3Auth, basicAuth)
 
-    def get_opener(self, key):
-        if not key or not key in self._openers:
-            return self._defaultOpener
+    def get_auth(self, key):
+        if not key or not key in self._auths:
+            return self._defaultAuth
 
-        return self._openers[key]
+        return self._auths[key]

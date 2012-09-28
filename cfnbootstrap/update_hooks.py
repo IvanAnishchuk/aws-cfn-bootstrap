@@ -1,27 +1,33 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
-from __future__ import with_statement
+from cfnbootstrap import util
+from cfnbootstrap.util import ProcessHelper
+from threading import Timer
+import calendar
+import collections
+import contextlib
+import datetime
 import logging
 import os
+import random
 import shelve
-import contextlib
-from cfnbootstrap.cfn_client import CloudFormationClient
-from cfnbootstrap.util import ProcessHelper
+import socket
+import subprocess
 import tempfile
-from cfnbootstrap import util
-import datetime
+import time
 try:
     import simplejson as json
 except ImportError:
@@ -29,7 +35,7 @@ except ImportError:
 
 log = logging.getLogger("cfn.hup")
 
-class UpdateError(Exception):
+class FatalUpdateError(Exception):
 
     def __init__(self, msg):
         self.msg = msg
@@ -53,6 +59,8 @@ class Hook(object):
         self._action = action
         self._name = name
         self._runas = runas
+        self.singleton = False
+        self.send_result = True
 
     @property
     def triggers(self):
@@ -74,14 +82,242 @@ class Hook(object):
     def runas(self):
         return self._runas
 
+    def is_cmd_hook(self):
+        return self._triggers == ['on.command']
+
+class AutoRefreshingCredentialsProvider(object):
+
+    def __init__(self, cfn_client, stack_name, listener_id):
+        self._cfn_client = cfn_client
+        self._stack_name = stack_name
+        self._listener_id = listener_id
+        self._creds = None
+        self._last_timer = None
+        self.listener_expired = False
+
+    def refresh(self):
+        log.info("Refreshing listener credentials")
+        if self._last_timer:
+            self._last_timer.cancel()
+
+        try:
+            self._creds = self._cfn_client.get_listener_credentials(self._stack_name, self._listener_id)
+            self.listener_expired = False
+        except IOError, e:
+            if hasattr(e, 'error_code') and 'ListenerExpired' == e.error_code:
+                self.listener_expired = True
+                log.exception("Listener expired")
+            else:
+                self.listener_expired = False
+                log.exception("IOError caught while refreshing credentials")
+        except Exception:
+            self.listener_expired = False
+            log.exception("Exception refreshing credentials")
+
+        now = time.time()
+        expiration = calendar.timegm(self._creds.expiration.utctimetuple()) if self._creds else now
+        remaining = expiration - now
+
+        if remaining > 30 * 60:
+            next_refresh = min(2 * 60 * 60, remaining / 2)
+        else:
+            next_refresh = 60 * random.random()
+
+        log.info("Scheduling next credential refresh in %s seconds", next_refresh)
+        t = Timer(next_refresh, self.refresh)
+        t.daemon = True
+        t.start()
+        self._last_timer = t
+
+    def creds_expired(self):
+        return self._creds and self._creds.expiration < datetime.datetime.utcnow()
+
+    @property
+    def credentials(self):
+        for i in range(3):
+            if self._creds:
+                break
+            self.refresh()
+
+        if not self._creds:
+            raise ValueError('Could not retrieve listener credentials')
+
+        return self._creds
+
+class CmdProcessor(object):
+    """Processes CommandService hooks"""
+
+    def __init__(self, stack_name, hooks, sqs_client, cfn_client):
+        """Takes a list of Hook objects and processes them"""
+        self.stack_name = stack_name
+        self.hooks = self._hooks_by_path(hooks)
+        self.sqs_client = sqs_client
+        self.cfn_client = cfn_client
+        self.listener_id = util.get_instance_id() if util.is_ec2() else socket.getfqdn()
+        self._create_shelf_dir()
+        self._creds_provider = AutoRefreshingCredentialsProvider(self.cfn_client, self.stack_name, self.listener_id)
+        self.queue_url = None
+
+    def is_registered(self):
+        return self.queue_url is not None and not self._creds_provider.listener_expired
+
+    def creds_expired(self):
+        return self._creds_provider.creds_expired()
+
+    def register(self):
+        self.queue_url = self.cfn_client.register_listener(self.stack_name, self.listener_id).queue_url
+        self._creds_provider.listener_expired = False
+
+    def _create_shelf_dir(self):
+        if os.name == 'nt':
+            self.shelf_dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-hup\data')
+        else:
+            self.shelf_dir = '/var/lib/cfn-hup/data'
+        if not os.path.isdir(self.shelf_dir):
+            log.debug("Creating %s", self.shelf_dir)
+            try:
+                os.makedirs(self.shelf_dir)
+            except OSError:
+                log.warn("Could not create %s; using temporary directory", self.shelf_dir)
+                self.shelf_dir = tempfile.mkdtemp()
+
+    def process(self):
+        if self.queue_url is None:
+            raise FatalUpdateError("Cannot process command hooks before registering")
+
+        with contextlib.closing(shelve.open(os.path.join(self.shelf_dir, 'command_db'))) as shelf:
+            try:
+                for msg in self.sqs_client.receive_message(self.queue_url, request_credentials = self._creds_provider.credentials):
+                    if self._process_msg(msg, shelf):
+                        self.sqs_client.delete_message(self.queue_url, msg.receipt_handle, request_credentials = self._creds_provider.credentials)
+            except FatalUpdateError:
+                raise
+            except IOError, e:
+                if hasattr(e, 'error_code') and 'AWS.SimpleQueueService.NonExistentQueue' == e.error_code:
+                    self.queue_url = None
+                log.exception("IOError caught while processing messages")
+            except Exception:
+                log.exception("Exception caught while processing messages")
+
+    def _process_msg(self, msg, shelf):
+        log.debug("Processing message: %s", msg)
+
+        try:
+            cmd_msg = json.loads(json.loads(msg.body)['Message'])
+            log.debug("Command message: %s", cmd_msg)
+
+            expiration = datetime.datetime.utcfromtimestamp(int(cmd_msg['Expiration']) / 1000)
+            cmds_run = shelf.get('commands_run', collections.defaultdict(set))
+            cmd_invocation = '%s|%s' % (cmd_msg['CommandName'], cmd_msg['InvocationId'])
+
+            if expiration < datetime.datetime.utcnow():
+                log.info("Invocation %s of command %s for stack %s expired at %s; skipping",
+                            cmd_msg['InvocationId'], cmd_msg['CommandName'], cmd_msg['DispatcherId'],
+                            expiration.isoformat())
+            elif cmd_invocation in cmds_run[cmd_msg['DispatcherId']]:
+                log.info("Invocation %s of command %s for stack %s has already run; skipping",
+                            cmd_msg['InvocationId'], cmd_msg['CommandName'], cmd_msg['DispatcherId'])
+            else:
+                hook_to_run = self.hooks.get(cmd_msg['CommandName'])
+                if not hook_to_run or self._run_hook(hook_to_run, cmd_msg):
+                    cmds_run[cmd_msg['DispatcherId']].add(cmd_invocation)
+                    shelf['commands_run'] = cmds_run
+                else:
+                    return False # transient failure, leave in queue
+        except (ValueError, KeyError):
+            log.exception("Invalid message received; deleting it")
+
+        return True
+
+    def _run_hook(self, hook, cmd_msg):
+        if hook.singleton:
+            log.info("Hook %s is configured to run as a singleton", hook.name)
+            leader = self.cfn_client.elect_command_leader(self.stack_name,
+                                                          cmd_msg['CommandName'],
+                                                          cmd_msg['InvocationId'],
+                                                          self.listener_id)
+            if leader == self.listener_id:
+                log.info("This listener is the leader.  Continuing with action")
+            else:
+                log.info("This listener is not the leader; %s is the leader.", leader)
+                return True
+
+        action_env = self._get_environment(cmd_msg)
+        result_queue = cmd_msg['ResultQueue']
+
+        log.info("Running action for %s", hook.name)
+
+        action = hook.action
+        if hook.runas:
+            action = ['su', hook.runas, '-c', action]
+
+        result = ProcessHelper(action, stderr=subprocess.PIPE, env=action_env).call()
+
+        log.debug("Action for %s output: %s", hook.name, result.stdout if result.stdout else '<None>')
+
+        if not hook.send_result:
+            return True
+
+        result_msg = { 'DispatcherId' : cmd_msg['DispatcherId'],
+                       'InvocationId' : cmd_msg['InvocationId'],
+                       'CommandName' : cmd_msg['CommandName'],
+                       'Status' : "FAILURE" if result.returncode else "SUCCESS",
+                       'ListenerId' : self.listener_id }
+
+        if result.returncode:
+            result_stderr = result.stderr.rstrip()
+            log.warn("Action for %s exited with %s, returning FAILURE", hook.name, result.returncode)
+            result_msg['Message'] = result_stderr if len(result_stderr) <= 1024 else result_stderr[0:500] + '...' + result_stderr[-500:]
+        else:
+            result_stdout = result.stdout.rstrip()
+            if len(result_stdout) > 1024:
+                log.error("stdout for %s was greater than 1024 in length, which is not allowed", hook.name)
+                result_msg['Status'] = 'FAILURE'
+                result_msg['Message'] = 'Result data was longer than 1024 bytes. Started with: ' + result_stdout[0:100]
+            else:
+                log.info("Action for %s succeeded, returning SUCCESS", hook.name)
+                result_msg['Data'] = result_stdout
+
+        try:
+            self.sqs_client.send_message(result_queue, json.dumps(result_msg), request_credentials=self._creds_provider.credentials)
+        except Exception:
+            log.exception('Error sending result; will leave message in queue')
+            return False
+
+        return True
+
+    def _hooks_by_path(self, hooks):
+        ret_hooks = {}
+        for hook in hooks:
+            if hook.path in ret_hooks:
+                raise FatalUpdateError("Multiple hooks for the same command (%s)" % hook.path)
+            ret_hooks[hook.path] = hook
+        return ret_hooks
+
+    def _get_environment(self, cmd_msg):
+        action_env = dict(os.environ)
+        action_env['CMD_DATA'] = cmd_msg['Data']
+        action_env['INVOCATION_ID'] = cmd_msg['InvocationId']
+        action_env['DISPATCHER_ID'] = cmd_msg['DispatcherId']
+        action_env['CMD_NAME'] = cmd_msg['CommandName']
+        action_env['STACK_NAME'] = self.stack_name
+        action_env['LISTENER_ID'] = self.listener_id
+        action_env['RESULT_QUEUE'] = cmd_msg['ResultQueue']
+        creds = self._creds_provider.credentials
+        action_env['RESULT_ACCESS_KEY'] = creds.access_key
+        action_env['RESULT_SECRET_KEY'] = creds.secret_key
+        action_env['RESULT_SESSION_TOKEN'] = creds.security_token
+        return action_env
+
+
 class HookProcessor(object):
     """Processes update hooks"""
 
-    def __init__(self, hooks, stack_name, access_key, secret_key, url):
+    def __init__(self, hooks, stack_name, client):
         """Takes a list of Hook objects and processes them"""
         self.hooks = hooks
         if os.name == 'nt':
-            self.dir = os.path.expandvars('${SystemDrive}\cfn\cfn-hup\data')
+            self.dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-hup\data')
         else:
             self.dir = '/var/lib/cfn-hup/data'
         if not os.path.isdir(self.dir):
@@ -89,10 +325,10 @@ class HookProcessor(object):
             try:
                 os.makedirs(self.dir)
             except OSError:
-                log.error("Could not create %s; using temporary directory", self.dir)
+                log.warn("Could not create %s; using temporary directory", self.dir)
                 self.dir = tempfile.mkdtemp()
 
-        self.client = CloudFormationClient(access_key, secret_key, url)
+        self.client = client
         self.stack_name = stack_name
 
     def process(self):
@@ -101,7 +337,7 @@ class HookProcessor(object):
             for hook in self.hooks:
                 try:
                     self._process_hook(hook, shelf)
-                except UpdateError:
+                except FatalUpdateError:
                     raise
                 except Exception:
                     log.exception("Exception caught while running hook %s", hook.name)
@@ -166,15 +402,15 @@ class HookProcessor(object):
     def _retrieve_path_data(self, path):
         parts = path.split('.', 3)
         if len(parts) < 2:
-            raise UpdateError("Unsupported path: paths must be in the form Resources.<LogicalResourceId>(.Metadata|PhysicalResourceId)(.<optional Metadata subkey>). Input: %s" % path)
+            raise FatalUpdateError("Unsupported path: paths must be in the form Resources.<LogicalResourceId>(.Metadata|PhysicalResourceId)(.<optional Metadata subkey>). Input: %s" % path)
 
         if parts[0].lower() != 'resources':
-            raise UpdateError('Unsupported path: only changes to Resources are supported (path: %s)' % path)
+            raise FatalUpdateError('Unsupported path: only changes to Resources are supported (path: %s)' % path)
 
         if len(parts) == 2:
             resourcePart = None
         elif parts[2].lower() not in ['metadata', 'physicalresourceid']:
-            raise UpdateError("Unsupported path: only Metadata or PhysicalResourceId can be specified after LogicalResourceId (path: %s)" % path)
+            raise FatalUpdateError("Unsupported path: only Metadata or PhysicalResourceId can be specified after LogicalResourceId (path: %s)" % path)
         else:
             resourcePart = parts[2].lower()
 

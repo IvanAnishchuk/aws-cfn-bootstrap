@@ -1,21 +1,27 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
-import logging
 from cfnbootstrap.construction_errors import ToolError
 from cfnbootstrap.util import ProcessHelper, interpret_boolean
+import logging
 import os.path
+import subprocess
+try:
+    import simplejson as json
+except ImportError:
+    import json
 
 log = logging.getLogger("cfn.init")
 
@@ -35,6 +41,8 @@ class CommandTool(object):
             env: a dictionary of environment variables
             test: a commmand to run; if it returns zero, the command will run
             ignoreErrors: if true, ignore errors
+            waitAfterCompletion: # of seconds to wait after completion (or "forever")
+            defaults: a command to run; the stdout will be used to provide defaults
 
         Exceptions:
         ToolError -- on expected failures
@@ -51,6 +59,18 @@ class CommandTool(object):
 
             attributes = action[name]
 
+            if "defaults" in attributes:
+                log.debug("Generating defaults for command %s", name)
+                defaultsResult = ProcessHelper(attributes['defaults'], stderr=subprocess.PIPE).call()
+                log.debug("Defaults script for %s output: %s", name, defaultsResult.stdout)
+                if defaultsResult.returncode:
+                    log.error("Defaults script failed for %s: %s", name, defaultsResult.stderr)
+                    raise ToolError("Defaults script for command %s failed" % name)
+
+                old_attrs = attributes
+                attributes = json.loads(defaultsResult.stdout)
+                attributes.update(old_attrs)
+
             if not "command" in attributes:
                 log.error("No command specified for %s", name)
                 raise ToolError("%s does not specify the 'command' attribute, which is required" % name)
@@ -62,12 +82,12 @@ class CommandTool(object):
                 log.debug("Running test for command %s", name)
                 test = attributes["test"]
                 testResult = ProcessHelper(test, env=env, cwd=cwd).call()
+                log.debug("Test command output: %s", testResult.stdout)
                 if testResult.returncode:
                     log.info("Test failed with code %s", testResult.returncode)
                     continue
                 else:
                     log.debug("Test for command %s passed", name)
-                log.debug("Test command output: %s", testResult.stdout)
             else:
                 log.debug("No test for command %s", name)
 
@@ -78,6 +98,7 @@ class CommandTool(object):
                 log.debug("Command %s output: %s", name, commandResult.stdout)
                 if interpret_boolean(attributes.get("ignoreErrors")):
                     log.info("ignoreErrors set to true, continuing build")
+                    commands_run.append(name)
                 else:
                     raise ToolError("Command %s failed" % name)
             else:
@@ -86,3 +107,10 @@ class CommandTool(object):
                 commands_run.append(name)
 
         return commands_run
+
+    @classmethod
+    def get_wait(cls, cmd_options):
+        wait = cmd_options.get('waitAfterCompletion', 60 if os.name == 'nt' else 0)
+        if isinstance(wait, basestring) and 'forever' == wait.lower():
+            return -1
+        return int(wait)

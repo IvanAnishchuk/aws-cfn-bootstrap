@@ -1,16 +1,17 @@
 #==============================================================================
 # Copyright 2011 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
-# Licensed under the Amazon Software License (the "License"). You may not use
-# this file except in compliance with the License. A copy of the License is
-# located at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       http://aws.amazon.com/asl/
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# or in the "license" file accompanying this file. This file is distributed on
-# an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or
-# implied. See the License for the specific language governing permissions
-# and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #==============================================================================
 """
 A library for building an installation from metadata
@@ -25,22 +26,147 @@ CloudFormationCarpenter - Orchestrates a non-delegated installation
 YumTool - installs packages via yum
 
 """
-from __future__ import with_statement
-from cfnbootstrap.construction_errors import BuildError, NoSuchConfigSetError,\
-    NoSuchConfigurationError, CircularConfigSetDependencyError
-from cfnbootstrap.service_tools import SysVInitTool
+from cfnbootstrap import platform_utils
 from cfnbootstrap.apt_tool import AptTool
 from cfnbootstrap.auth import AuthenticationConfig
 from cfnbootstrap.command_tool import CommandTool
-from cfnbootstrap.user_group_tools import GroupTool, UserTool
+from cfnbootstrap.construction_errors import BuildError, NoSuchConfigSetError, \
+    NoSuchConfigurationError, CircularConfigSetDependencyError
 from cfnbootstrap.file_tool import FileTool
-from cfnbootstrap.rpm_tools import RpmTool, YumTool
 from cfnbootstrap.lang_package_tools import PythonTool, GemTool
+from cfnbootstrap.msi_tool import MsiTool
+from cfnbootstrap.rpm_tools import RpmTool, YumTool
+from cfnbootstrap.service_tools import SysVInitTool
 from cfnbootstrap.sources_tool import SourcesTool
+from cfnbootstrap.user_group_tools import GroupTool, UserTool
 import collections
+import contextlib
 import logging
+import operator
+import os.path
+import shelve
+import sys
+import time
 
 log = logging.getLogger("cfn.init")
+
+class WorkLog(object):
+    """
+    Keeps track of pending work, and can resume from the last known point
+    Useful for commands that cause restarts
+    """
+
+    def __init__(self, dbname='resume_db'):
+        if os.name == 'nt':
+            self._shelf_dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-init')
+        else:
+            self._shelf_dir = '/var/lib/cfn-init'
+
+        if not os.path.isdir(self._shelf_dir) and not os.path.exists(self._shelf_dir):
+            os.makedirs(self._shelf_dir)
+
+        if not os.path.isdir(self._shelf_dir):
+            print >> sys.stderr, "Could not create %s to store the work log" % self._shelf_dir
+            logging.error("Could not create %s to store the work log", self._shelf_dir)
+
+        self._dbname = dbname
+
+    def clear(self):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            shelf.clear()
+
+    def clear_except_metadata(self):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            metadata = shelf.get('metadata')
+            shelf.clear()
+            if metadata:
+                shelf['metadata'] = metadata
+
+    def put(self, key, data):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            if data:
+                shelf[key] = data
+            elif key in shelf:
+                del shelf[key]
+
+    def has_key(self, key):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            return key in shelf
+
+    def get(self, key, default=None):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            return shelf.get(key, default)
+
+    def delete(self, key):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            del shelf[key]
+
+    def pop(self, key):
+        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
+            value = shelf[key]
+            ret_val = value.popleft()
+            if not value:
+                del shelf[key]
+            else:
+                shelf[key] = value
+        return ret_val
+
+    def build(self, metadata, configSets):
+        self.put('metadata', metadata)
+        platform_utils.set_reboot_trigger()
+        Contractor(metadata).build(configSets, self)
+
+    def run_commands(self):
+        cmd_tool = CommandTool()
+        while self.has_key('commands'):
+            next_cmd = self.pop('commands')
+            changes = self.get('changes', collections.defaultdict(list))
+            cmd_options = next_cmd[1]
+            command_changes = cmd_tool.apply({next_cmd[0]:cmd_options})
+            changes['commands'].extend(command_changes)
+            self.put('changes', changes)
+            if not command_changes:
+                log.info("Not waiting as command did not execute")
+            else:
+                wait = CommandTool.get_wait(cmd_options)
+                if wait < 0:
+                    log.info("Waiting indefinitely for command to reboot")
+                    sys.exit(0)
+                elif wait > 0:
+                    log.info("Waiting %s seconds for reboot", wait)
+                    time.sleep(wait)
+
+        if self.has_key('changes'):
+            self.delete('changes')
+
+        if self.has_key('services'):
+            self.delete('services')
+
+    def resume(self):
+        log.debug("Starting resume")
+        platform_utils.set_reboot_trigger()
+
+        self.run_commands()
+
+        contractor = Contractor(self.get('metadata'))
+
+        #TODO: apply services when supported by Windows
+
+        while self.has_key('configs'):
+            next_config = self.pop('configs')
+            log.debug("Resuming config: %s", next_config.name)
+            contractor.run_config(next_config, self)
+
+        if self.has_key('configSets'):
+            remaining_sets = self.get('configSets')
+            log.debug("Resuming configSets: %s", remaining_sets)
+            contractor.build(remaining_sets, self)
+        else:
+            self.clear()
+            platform_utils.clear_reboot_trigger()
+
+        log.debug("Resume completed")
+
 
 class CloudFormationCarpenter(object):
     """
@@ -51,9 +177,10 @@ class CloudFormationCarpenter(object):
                       "rubygems" : GemTool,
                       "python" : PythonTool,
                       "rpm" : RpmTool,
-                      "apt" : AptTool }
+                      "apt" : AptTool,
+                      "msi" : MsiTool }
 
-    _pkgOrder = ["dpkg", "rpm", "apt", "yum"]
+    _pkgOrder = ["msi", "dpkg", "rpm", "apt", "yum"]
 
     _serviceTools = { "sysvinit" : SysVInitTool }
 
@@ -73,14 +200,14 @@ class CloudFormationCarpenter(object):
         self._config = config
         self._auth_config = auth_config
 
-    def build(self):
+    def build(self, worklog):
         changes = collections.defaultdict(list)
 
         changes['packages'] = collections.defaultdict(list)
         if self._config.packages:
             for manager, packages in sorted(self._config.packages.iteritems(), cmp=CloudFormationCarpenter._pkgsort):
                 if manager in CloudFormationCarpenter._packageTools:
-                    changes['packages'][manager] = CloudFormationCarpenter._packageTools[manager]().apply(packages)
+                    changes['packages'][manager] = CloudFormationCarpenter._packageTools[manager]().apply(packages, self._auth_config)
                 else:
                     log.warn('Unsupported package manager: %s', manager)
         else:
@@ -107,16 +234,23 @@ class CloudFormationCarpenter(object):
             log.debug("No files specified")
 
         if self._config.commands:
-            changes['commands'] = CommandTool().apply(self._config.commands)
+            if os.name=='nt':
+                worklog.put('changes', changes)
+                worklog.put('commands', collections.deque(sorted(self._config.commands.iteritems(), key=operator.itemgetter(0))))
+            else:
+                changes['commands'] = CommandTool().apply(self._config.commands)
         else:
             log.debug("No commands specified")
 
         if self._config.services:
-            for manager, services in self._config.services.iteritems():
-                if manager in CloudFormationCarpenter._serviceTools:
-                    CloudFormationCarpenter._serviceTools[manager]().apply(services, changes)
-                else:
-                    log.warn("Unsupported service manager: %s", manager)
+            if os.name=='nt':
+                worklog.put('services', self._config.services)
+            else:
+                for manager, services in self._config.services.iteritems():
+                    if manager in CloudFormationCarpenter._serviceTools:
+                        CloudFormationCarpenter._serviceTools[manager]().apply(services, changes)
+                    else:
+                        log.warn("Unsupported service manager: %s", manager)
         else:
             log.debug("No services specified")
 
@@ -336,22 +470,45 @@ class Contractor(object):
 
         return returnSet
 
-    def build(self, configSets):
+
+    def build(self, configSets, worklog):
         """Does the work described by each configSet, in order, returning nothing"""
 
-        for configSetName in configSets:
+        worklog.clear_except_metadata()
+
+        configSets = collections.deque(configSets)
+        log.info("Running configSets: %s", configSets)
+
+        while configSets:
+            configSetName = configSets.popleft()
             if not configSetName in self._configSets:
                 raise NoSuchConfigSetError("Error: no ConfigSet named %s exists" % configSetName)
 
-            configSet = self._configSets[configSetName]
+            worklog.put('configSets', configSets)
+
+            configSet = collections.deque(self._configSets[configSetName])
             log.info("Running configSet %s", configSetName)
-            for config in configSet:
-                log.info("Running config %s", config.name)
-                try:
-                    CloudFormationCarpenter(config, self._auth_config).build()
-                except BuildError, e:
-                    log.exception("Error encountered during build of ConfigSet %s: %s", configSetName, str(e))
-                    raise
+            while configSet:
+                config = configSet.popleft()
+
+                worklog.put('configs', configSet)
+
+                self.run_config(config, worklog)
+
+        log.info("ConfigSets completed")
+        worklog.clear()
+        platform_utils.clear_reboot_trigger()
+
+    def run_config(self, config, worklog):
+        log.info("Running config %s", config.name)
+        try:
+            CloudFormationCarpenter(config, self._auth_config).build(worklog)
+
+            if worklog.has_key('commands'):
+                worklog.run_commands()
+        except BuildError, e:
+            log.exception("Error encountered during build of %s: %s", config.name, str(e))
+            raise
 
     @classmethod
     def metadataValid(cls, metadata):
