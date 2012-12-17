@@ -91,7 +91,17 @@ class CommandTool(object):
             else:
                 log.debug("No test for command %s", name)
 
-            commandResult = ProcessHelper(attributes["command"], env=env, cwd=cwd).call()
+            cmd_to_run = attributes["command"]
+            if "runas" in attributes:
+                if os.name == 'nt':
+                    raise ToolError('Command %s specified "runas", which is not supported on Windows' % name)
+
+                if isinstance(cmd_to_run, basestring):
+                    cmd_to_run = 'su %s -c %s' % (attributes['runas'], cmd_to_run)
+                else:
+                    cmd_to_run = ['su', attributes['runas'], '-c'] + cmd_to_run
+
+            commandResult = ProcessHelper(cmd_to_run, env=env, cwd=cwd).call()
 
             if commandResult.returncode:
                 log.error("Command %s (%s) failed", name, attributes["command"])

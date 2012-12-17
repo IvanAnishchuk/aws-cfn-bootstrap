@@ -14,8 +14,12 @@
 # limitations under the License.
 #==============================================================================
 from cfnbootstrap import util
+from cfnbootstrap.aws_client import Credentials
+from cfnbootstrap.cfn_client import CloudFormationClient
+from cfnbootstrap.sqs_client import SQSClient
 from cfnbootstrap.util import ProcessHelper
 from threading import Timer
+import ConfigParser
 import calendar
 import collections
 import contextlib
@@ -34,6 +38,109 @@ except ImportError:
     import json
 
 log = logging.getLogger("cfn.hup")
+
+def parse_config(config_path):
+    main_conf_path = os.path.join(config_path, 'cfn-hup.conf')
+    if not os.path.isfile(main_conf_path):
+        raise ValueError("Could not find main configuration at %s" % main_conf_path)
+
+    main_config = ConfigParser.SafeConfigParser()
+    main_config.read(main_conf_path)
+
+    if not main_config.has_option('main', 'stack'):
+        raise ValueError("[main] section must contain stack option")
+
+    stack = main_config.get('main', 'stack')
+
+    if main_config.has_option('main', 'credential-file'):
+        try:
+            access_key, secret_key = util.extract_credentials(main_config.get('main', 'credential-file'))
+        except IOError, e:
+            raise ValueError("Could not retrieve credentials from file:\n\t%s" % e.strerror)
+    else:
+        access_key, secret_key = ('', '')
+
+    additional_hooks_path = os.path.join(config_path, 'hooks.d')
+    additional_files = []
+    if os.path.isdir(additional_hooks_path):
+        for hook_file in os.listdir(additional_hooks_path):
+            if os.path.isfile(os.path.join(additional_hooks_path, hook_file)):
+                additional_files.append(os.path.join(additional_hooks_path, hook_file))
+
+    hooks_config = ConfigParser.SafeConfigParser()
+    files_read = hooks_config.read([os.path.join(config_path, 'hooks.conf')] + additional_files)
+
+    if not files_read:
+        raise ValueError("No hook configurations found at %s or %s.", os.path.join(config_path, 'hooks.conf'), additional_hooks_path)
+
+    hooks = []
+    cmd_hooks = []
+
+    for section in hooks_config.sections():
+        if not hooks_config.has_option(section, 'triggers'):
+            logging.error("No triggers specified for hook %s", section)
+            continue
+
+        triggers = [s.strip() for s in hooks_config.get(section, 'triggers').split(',')]
+
+        if not hooks_config.has_option(section, 'path'):
+            logging.error("No path specified for hook %s", section)
+            continue
+
+        if not hooks_config.has_option(section, 'action'):
+            logging.error("No action specified for hook %s", section)
+            continue
+
+        runas = None
+        if hooks_config.has_option(section, 'runas'):
+            runas = hooks_config.get(section, 'runas').strip()
+
+        hook = Hook(section,
+                    triggers,
+                    hooks_config.get(section, 'path').strip(),
+                    hooks_config.get(section, 'action'),
+                    runas)
+        if hook.is_cmd_hook():
+            if hooks_config.has_option(section, 'singleton'):
+                hook.singleton = util.interpret_boolean(hooks_config.get(section, 'singleton'))
+            if hooks_config.has_option(section, 'send_result'):
+                hook.send_result = util.interpret_boolean(hooks_config.get(section, 'send_result'))
+            cmd_hooks.append(hook)
+        else:
+            hooks.append(hook)
+
+    if not hooks and not cmd_hooks:
+        raise ValueError("No valid hooks found")
+
+    region = 'us-east-1'
+    if main_config.has_option('main', 'region'):
+        region = main_config.get('main', 'region')
+
+    cfn_url = CloudFormationClient.endpointForRegion(region)
+
+    if main_config.has_option('main', 'url'):
+        cfn_url = main_config.get('main', 'url')
+
+    cfn_client = CloudFormationClient(Credentials(access_key, secret_key), cfn_url, region)
+
+    if hooks:
+        processor = HookProcessor(hooks, stack, cfn_client)
+    else:
+        processor = None
+
+    if cmd_hooks:
+        sqs_url = SQSClient.endpointForRegion(region)
+        if main_config.has_option('main', 'sqs_url'):
+            sqs_url = main_config.get('main', 'sqs_url')
+
+        sqs_client = SQSClient(Credentials(access_key, secret_key), sqs_url)
+
+        cmd_processor = CmdProcessor(stack, cmd_hooks, sqs_client,
+                                     CloudFormationClient(Credentials(access_key, secret_key), cfn_url, region))
+    else:
+        cmd_processor = None
+
+    return (main_config, processor, cmd_processor)
 
 class FatalUpdateError(Exception):
 
@@ -218,6 +325,7 @@ class CmdProcessor(object):
                 log.info("Invocation %s of command %s for stack %s has already run; skipping",
                             cmd_msg['InvocationId'], cmd_msg['CommandName'], cmd_msg['DispatcherId'])
             else:
+                log.info("Received command %s (invocation id: %s)", cmd_msg['CommandName'], cmd_msg['InvocationId'])
                 hook_to_run = self.hooks.get(cmd_msg['CommandName'])
                 if not hook_to_run or self._run_hook(hook_to_run, cmd_msg):
                     cmds_run[cmd_msg['DispatcherId']].add(cmd_invocation)
@@ -246,6 +354,7 @@ class CmdProcessor(object):
         result_queue = cmd_msg['ResultQueue']
 
         log.info("Running action for %s", hook.name)
+        log.debug("Action environment: %s", action_env)
 
         action = hook.action
         if hook.runas:

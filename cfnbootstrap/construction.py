@@ -36,7 +36,7 @@ from cfnbootstrap.file_tool import FileTool
 from cfnbootstrap.lang_package_tools import PythonTool, GemTool
 from cfnbootstrap.msi_tool import MsiTool
 from cfnbootstrap.rpm_tools import RpmTool, YumTool
-from cfnbootstrap.service_tools import SysVInitTool
+from cfnbootstrap.service_tools import SysVInitTool, WindowsServiceTool
 from cfnbootstrap.sources_tool import SourcesTool
 from cfnbootstrap.user_group_tools import GroupTool, UserTool
 import collections
@@ -135,6 +135,12 @@ class WorkLog(object):
                 elif wait > 0:
                     log.info("Waiting %s seconds for reboot", wait)
                     time.sleep(wait)
+            
+        for manager, services in self.get('services', {}).iteritems():
+            if manager in CloudFormationCarpenter._serviceTools:
+                CloudFormationCarpenter._serviceTools[manager]().apply(services, self.get('changes', collections.defaultdict(list)))
+            else:
+                log.warn("Unsupported service manager: %s", manager)
 
         if self.has_key('changes'):
             self.delete('changes')
@@ -182,7 +188,7 @@ class CloudFormationCarpenter(object):
 
     _pkgOrder = ["msi", "dpkg", "rpm", "apt", "yum"]
 
-    _serviceTools = { "sysvinit" : SysVInitTool }
+    _serviceTools = { "sysvinit" : SysVInitTool, "windows" : WindowsServiceTool }
 
     @staticmethod
     def _pkgsort(x, y):
@@ -477,7 +483,7 @@ class Contractor(object):
         worklog.clear_except_metadata()
 
         configSets = collections.deque(configSets)
-        log.info("Running configSets: %s", configSets)
+        log.info("Running configSets: %s", ', '.join(configSets))
 
         while configSets:
             configSetName = configSets.popleft()
@@ -504,8 +510,7 @@ class Contractor(object):
         try:
             CloudFormationCarpenter(config, self._auth_config).build(worklog)
 
-            if worklog.has_key('commands'):
-                worklog.run_commands()
+            worklog.run_commands()
         except BuildError, e:
             log.exception("Error encountered during build of %s: %s", config.name, str(e))
             raise

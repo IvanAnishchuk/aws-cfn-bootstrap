@@ -15,6 +15,7 @@
 #==============================================================================
 from requests.exceptions import ConnectionError, HTTPError, Timeout, \
     RequestException, SSLError
+import StringIO
 import imp
 import logging
 import os.path
@@ -194,7 +195,7 @@ def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
 def json_from_response(resp):
     if hasattr(resp, 'json'):
         return resp.json
-    return json.load(resp.raw)
+    return json.load(StringIO.StringIO(resp.content))
 
 class ProcessResult(object):
     """
@@ -229,7 +230,12 @@ class ProcessHelper(object):
         self._cmd = cmd
         self._stdout = stdout
         self._stderr = stderr
-        self._env = env
+        if not env:
+            self._env = None
+        elif os.name == 'nt': # stringify the environment in Windows, which cannot handle unicodes
+            self._env = dict(((str(k), str(v)) for k,v in env.iteritems()))
+        else:
+            self._env = dict(env)
         self._cwd = cwd
 
     def call(self):

@@ -143,7 +143,8 @@ class SourcesTool(object):
                                        verify=util.get_cert(),
                                        prefetch=False,
                                        config={'danger_mode' : True})
-        shutil.copyfileobj(remote_contents.raw, tf)
+        tf.write(remote_contents.content)
+        tf.flush()
         tf.seek(0, os.SEEK_SET)
         return tf
 

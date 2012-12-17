@@ -133,6 +133,8 @@ class FileTool(object):
             backup_file = filename + '.bak'
             if os.path.exists(backup_file):
                 backup_backup_file = backup_file + "2"
+                if os.path.exists(backup_backup_file):
+                    os.remove(backup_backup_file)
                 self._backup_file(backup_file, backup_backup_file)
             self._backup_file(filename, backup_file)
 
@@ -141,6 +143,8 @@ class FileTool(object):
         except Exception:
             if backup_file:
                 try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
                     self._backup_file(backup_file, filename)
                     if backup_backup_file:
                         self._backup_file(backup_backup_file, backup_file)
@@ -190,7 +194,7 @@ class FileTool(object):
                                        verify=util.get_cert(),
                                        prefetch=False,
                                        config={'danger_mode' : True})
-        shutil.copyfileobj(remote_contents.raw, dest)
+        dest.write(remote_contents.content)
 
     def _write_inline_content(self, dest, content, is_base64):
         if not isinstance(content, basestring):

@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
-
 from cfnbootstrap import util
 from cfnbootstrap.construction_errors import ToolError
 from cfnbootstrap.util import ProcessHelper
@@ -23,7 +22,115 @@ import os.path
 
 log = logging.getLogger("cfn.init")
 
-class SysVInitTool(object):
+_windows_supported = True
+try:
+    import win32service
+    import win32serviceutil
+except ImportError:
+    _windows_supported = False
+
+class ServiceTool(object):
+
+    def _detect_required_restart(self, serviceProperties, changes):
+        if self._list_type_change_occurred(serviceProperties, changes, 'files'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'sources'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'groups'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'users'):
+            return True
+
+        if self._list_type_change_occurred(serviceProperties, changes, 'commands'):
+            return True
+
+        if 'packages' in serviceProperties and 'packages' in changes:
+            for manager, pkg_list in changes['packages'].iteritems():
+                if manager in serviceProperties['packages']:
+                    if frozenset(serviceProperties['packages'][manager]) & frozenset(pkg_list):
+                        return True
+
+        return False
+
+    def _list_type_change_occurred(self, serviceProperties, changes, key):
+        if key in serviceProperties and key in changes:
+            if frozenset(serviceProperties[key]) & frozenset(changes[key]):
+                return True
+
+        return False
+
+class WindowsServiceTool(ServiceTool):
+    """
+    Manages Windows services
+    
+    """
+    
+    def apply(self, action, changes = collections.defaultdict(list)):
+        """
+        Takes a dict of service name to dict.
+        Keys we look for are:
+            - "enabled" (setting a service to "Automatic")
+            - "ensureRunning" (actually start the service)
+        """
+
+        if not action.keys():
+            log.debug("No Windows services specified")
+            return
+        
+        if not _windows_supported:
+            raise ToolError("Cannot modify windows services without pywin32")
+        
+        manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
+        try:
+            for service, serviceProperties in action.iteritems():
+                handle = win32service.OpenService(manager, service, win32service.SERVICE_ALL_ACCESS)
+                try:
+                    if "enabled" in serviceProperties:
+                        start_type = win32service.SERVICE_AUTO_START if util.interpret_boolean(serviceProperties["enabled"]) else win32service.SERVICE_DEMAND_START
+                        self._set_service_startup_type(handle, start_type)
+                    else:
+                        log.debug("Not modifying enabled state of service %s", service)
+                        
+                    if self._detect_required_restart(serviceProperties, changes):
+                        log.debug("Restarting %s due to change detected in dependency", service)
+                        win32serviceutil.RestartService(service)
+                    elif "ensureRunning" in serviceProperties:
+                        ensureRunning = util.interpret_boolean(serviceProperties["ensureRunning"])
+                        status = win32service.QueryServiceStatus(handle)[1]
+                        isRunning = status & win32service.SERVICE_RUNNING or status & win32service.SERVICE_START_PENDING
+                                        
+                        if ensureRunning and not isRunning:
+                            log.debug("Starting service %s as it is not running", service)
+                            win32service.StartService(handle, None)
+                        elif not ensureRunning and isRunning:
+                            log.debug("Stopping service %s as it is running", service)
+                            win32service.ControlService(handle, win32service.SERVICE_CONTROL_STOP)
+                        else:
+                            log.debug("No need to modify running state of service %s", service)
+                    else:
+                        log.debug("Not modifying running state of service %s", service)
+                finally:
+                    win32service.CloseServiceHandle(handle)
+        finally:
+            win32service.CloseServiceHandle(manager)
+    
+    def _set_service_startup_type(self, service, start_type):
+        win32service.ChangeServiceConfig(service,
+                                         win32service.SERVICE_NO_CHANGE,
+                                         start_type,
+                                         win32service.SERVICE_NO_CHANGE,
+                                         None,
+                                         None,
+                                         0,
+                                         None,
+                                         None,
+                                         None,
+                                         None)
+
+class SysVInitTool(ServiceTool):
     """
     Manages SysV Init services
 
@@ -65,37 +172,6 @@ class SysVInitTool(object):
                     log.debug("No need to modify running state of service %s", service)
             else:
                 log.debug("Not modifying running state of service %s", service)
-
-    def _detect_required_restart(self, serviceProperties, changes):
-        if self._list_type_change_occurred(serviceProperties, changes, 'files'):
-            return True
-
-        if self._list_type_change_occurred(serviceProperties, changes, 'sources'):
-            return True
-
-        if self._list_type_change_occurred(serviceProperties, changes, 'groups'):
-            return True
-
-        if self._list_type_change_occurred(serviceProperties, changes, 'users'):
-            return True
-
-        if self._list_type_change_occurred(serviceProperties, changes, 'commands'):
-            return True
-
-        if 'packages' in serviceProperties and 'packages' in changes:
-            for manager, pkg_list in changes['packages'].iteritems():
-                if manager in serviceProperties['packages']:
-                    if frozenset(serviceProperties['packages'][manager]) & frozenset(pkg_list):
-                        return True
-
-        return False
-
-    def _list_type_change_occurred(self, serviceProperties, changes, key):
-        if key in serviceProperties and key in changes:
-            if frozenset(serviceProperties[key]) & frozenset(changes[key]):
-                return True
-
-        return False
 
     def _restart_service(self, service):
         cmd = self._get_service_executable(service)

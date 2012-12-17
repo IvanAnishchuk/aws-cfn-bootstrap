@@ -27,7 +27,7 @@ if sys.version_info[0] == 2 and sys.version_info[1] < 6:
         sys.exit(1)
 
 rpm_requires = ['python >= 2.6', 'python-daemon', 'python-requests']
-dependencies = ['python-daemon>=1.5.2', 'requests>=0.11.1']
+dependencies = ['python-daemon>=1.5.2', 'requests>=0.11.1,<1.0.0']
 
 _distclass = Distribution
 _opts = {
@@ -43,7 +43,7 @@ try:
         def __init__(self, attrs):
             self.com_server = []
             self.ctypes_com_server = []
-            self.service = []
+            self.service = ["cfnbootstrap.winhup"]
             self.isapi = []
             self.windows = []
             self.zipfile = 'library.zip'

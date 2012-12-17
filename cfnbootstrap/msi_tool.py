@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import requests
-import shutil
 import tempfile
 
 log = logging.getLogger("cfn.init")
@@ -92,7 +91,7 @@ class MsiTool(object):
             for tmp_pkg in tmp_pkgs:
                 os.remove(tmp_pkg)
 
-    @util.retry_on_failure
+    @util.retry_on_failure()
     def _msi_from_url(self, archive, auth_config):
         tf = tempfile.mkstemp(suffix='.msi', prefix='cfn-init-tmp')
         remote_contents = requests.get(archive,
@@ -101,7 +100,7 @@ class MsiTool(object):
                                        prefetch=False,
                                        config={'danger_mode' : True})
         with os.fdopen(tf[0], 'wb') as temp_dest:
-            shutil.copyfileobj(remote_contents.raw, temp_dest)
+            temp_dest.write(remote_contents.content)
 
         return tf[1]
 

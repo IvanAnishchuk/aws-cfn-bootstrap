@@ -24,6 +24,7 @@ Message  - a message from an SQS queue
 from cfnbootstrap import aws_client
 from cfnbootstrap.util import retry_on_failure
 from xml.etree import ElementTree
+import StringIO
 import logging
 import re
 
@@ -84,7 +85,7 @@ class SQSClient(aws_client.Client):
         if visibility_timeout:
             params['VisibilityTimeout'] = str(visibility_timeout)
 
-        return Message._parse_list(self._call(params, queue_url, request_credentials).raw, self._xmlns)
+        return Message._parse_list(StringIO.StringIO(self._call(params, queue_url, request_credentials).content), self._xmlns)
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
     def send_message(self, queue_url, message_body, delay_seconds=None, request_credentials=None):
@@ -101,7 +102,7 @@ class SQSClient(aws_client.Client):
         if delay_seconds:
             params["DelaySeconds"] = delay_seconds
 
-        root = ElementTree.ElementTree(file=self._call(params, queue_url, request_credentials, verb='POST').raw)
+        root = ElementTree.ElementTree(file=StringIO.StringIO(self._call(params, queue_url, request_credentials, verb='POST').content))
         message_id = root.findtext('{%s}SendMessageResult/{%s}MessageId' % (self._xmlns, self._xmlns))
         md5_of_body = root.findtext('{%s}SendMessageResult/{%s}MD5OfMessageBody' % (self._xmlns, self._xmlns))
 

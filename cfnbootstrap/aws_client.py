@@ -23,6 +23,7 @@ AWSClient - an HTTP client that makes signed requests
 from cfnbootstrap import util
 from requests import api
 from xml.etree import ElementTree
+import StringIO
 import base64
 import datetime
 import hashlib
@@ -267,7 +268,7 @@ class Client(object):
     def _get_xml_extractor(xmlns):
         def _extract_xml_message(resp):
             try:
-                eDoc = ElementTree.ElementTree(file=resp.raw)
+                eDoc = ElementTree.ElementTree(file=StringIO.StringIO(resp.content))
                 code = eDoc.findtext('{%s}Error/{%s}Code' % (xmlns, xmlns))
                 error_type = eDoc.findtext('{%s}Error/{%s}Type' % (xmlns, xmlns))
                 message = eDoc.findtext('{%s}Error/{%s}Message' % (xmlns, xmlns))
