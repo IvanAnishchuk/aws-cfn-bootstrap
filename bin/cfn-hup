@@ -17,12 +17,7 @@
 #==============================================================================
 import cfnbootstrap
 from cfnbootstrap import update_hooks, util
-from cfnbootstrap.aws_client import Credentials
-from cfnbootstrap.cfn_client import CloudFormationClient
-from cfnbootstrap.sqs_client import SQSClient
 from optparse import OptionParser
-from optparse import OptionGroup
-import ConfigParser
 import logging
 import os
 import threading
@@ -89,7 +84,7 @@ def main():
         def do_process(last_log=datetime.datetime.utcnow()):
             if datetime.datetime.utcnow() - last_log > datetime.timedelta(minutes=5):
                 last_log = datetime.datetime.utcnow()
-                log.info("cfn-hup processing is alive.")
+                logging.info("cfn-hup processing is alive.")
 
             try:
                 processor.process()
@@ -103,14 +98,14 @@ def main():
         def do_cmd_process(last_log=datetime.datetime.utcnow()):
             if datetime.datetime.utcnow() - last_log > datetime.timedelta(minutes=5):
                 last_log = datetime.datetime.utcnow()
-                log.info("command processing is alive.")
+                logging.info("command processing is alive.")
 
             delay = 1
             try:
                 if not cmd_processor.is_registered():
                     cmd_processor.register()
                 if cmd_processor.creds_expired():
-                    log.error("Expired credentials found; skipping process")
+                    logging.error("Expired credentials found; skipping process")
                     delay = 20
                 else:
                     cmd_processor.process()
