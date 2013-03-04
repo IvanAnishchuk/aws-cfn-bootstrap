@@ -98,6 +98,7 @@ class MsiTool(object):
                                        auth=auth_config.get_auth(None),
                                        verify=util.get_cert(),
                                        prefetch=False,
+                                       hooks=dict(pre_request=util.log_request, response=util.log_response),
                                        config={'danger_mode' : True})
         with os.fdopen(tf[0], 'wb') as temp_dest:
             temp_dest.write(remote_contents.content)

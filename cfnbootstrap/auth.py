@@ -21,18 +21,23 @@ import hmac
 import logging
 import re
 import urlparse
+import util
 
 log = logging.getLogger("cfn.init")
 
 class S3Signer(object):
 
-    def __init__(self, access_key, secret_key):
+    def __init__(self, access_key, secret_key, token=None):
         self._access_key = access_key
         self._secret_key = secret_key
+        self._token = token
 
     def sign(self, req):
         if 'Date' not in req.headers:
             req.headers['X-Amz-Date'] = datetime.datetime.utcnow().replace(microsecond=0).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+        if self._token:
+            req.headers['x-amz-security-token'] = self._token
 
         stringToSign = req.method + '\n'
         stringToSign += req.headers.get('content-md5', '') + '\n'
@@ -53,7 +58,7 @@ class S3Signer(object):
 
     def _canonicalize_resource(self, req):
         url = urlparse.urlparse(req.full_url)
-        match = re.match(r'^([^\.]+)\.s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
+        match = re.match(r'^([-\w\.]+?)\.s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
         if match:
             return '/' + match.group(1) + url.path
         return url.path
@@ -61,20 +66,20 @@ class S3Signer(object):
 class S3DefaultAuth(AuthBase):
 
     def __init__(self):
-        self._bucketToSigner = {}
+        self._bucketToAuth = {}
 
-    def add_creds_for_bucket(self, bucket, access_key, secret_key):
-        self._bucketToSigner[bucket] = S3Signer(access_key, secret_key)
+    def add_auth_for_bucket(self, bucket, auth_impl):
+        self._bucketToAuth[bucket] = auth_impl
 
     def __call__(self, req):
         bucket = self._extract_bucket(req)
-        if bucket and bucket in self._bucketToSigner:
-            return self._bucketToSigner[bucket].sign(req)
+        if bucket and bucket in self._bucketToAuth:
+            return self._bucketToAuth[bucket](req)
         return req
 
     def _extract_bucket(self, req):
         url = urlparse.urlparse(req.full_url)
-        match = re.match(r'^([^\.]+\.)?s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
+        match = re.match(r'^([-\w\.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
         if not match:
             # Not an S3 URL, skip
             return None
@@ -85,6 +90,15 @@ class S3DefaultAuth(AuthBase):
             # This means that we're using path-style buckets
             # lop off the first / and return everything up to the next /
             return url.path[1:].partition('/')[0]
+
+
+class S3RoleAuth(AuthBase):
+
+    def __init__(self, roleName):
+        self._roleName=roleName
+
+    def __call__(self, req):
+        return S3Signer(*util.get_role_creds(self._roleName)).sign(req)
 
 class S3Auth(AuthBase):
 
@@ -129,11 +143,22 @@ class AuthenticationConfig(object):
         for key, config in model.iteritems():
             configType = config.get('type', '')
             if 's3' == configType.lower():
-                self._auths[key] = S3Auth(config.get('accessKeyId'), config.get('secretKey'))
+                auth_impl = None
+                if 'accessKeyId' in config and 'secretKey' in config:
+                    auth_impl = S3Auth(config['accessKeyId'], config['secretKey'])
+                elif 'roleName' in config:
+                    auth_impl = S3RoleAuth(config['roleName'])
+                else:
+                    log.warn('S3 auth requires either "accessKeyId" and "secretKey" or "roleName"')
+                    continue
+
+                self._auths[key] = auth_impl
+
                 if 'buckets' in config:
                     buckets = [config['buckets']] if isinstance(config['buckets'], basestring) else config['buckets']
                     for bucket in buckets:
-                        s3Auth.add_creds_for_bucket(bucket, config.get('accessKeyId'), config.get('secretKey'))
+                        s3Auth.add_auth_for_bucket(bucket, auth_impl)
+
             elif 'basic' == configType.lower():
                 self._auths[key] = HTTPBasicAuth(config.get('username'), config.get('password'))
                 if 'uris' in config:

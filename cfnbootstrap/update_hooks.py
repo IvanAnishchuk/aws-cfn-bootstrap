@@ -14,7 +14,6 @@
 # limitations under the License.
 #==============================================================================
 from cfnbootstrap import util
-from cfnbootstrap.aws_client import Credentials
 from cfnbootstrap.cfn_client import CloudFormationClient
 from cfnbootstrap.sqs_client import SQSClient
 from cfnbootstrap.util import ProcessHelper
@@ -32,6 +31,8 @@ import socket
 import subprocess
 import tempfile
 import time
+from util import Credentials
+
 try:
     import simplejson as json
 except ImportError:
@@ -294,7 +295,7 @@ class CmdProcessor(object):
 
         with contextlib.closing(shelve.open(os.path.join(self.shelf_dir, 'command_db'))) as shelf:
             try:
-                for msg in self.sqs_client.receive_message(self.queue_url, request_credentials = self._creds_provider.credentials):
+                for msg in self.sqs_client.receive_message(self.queue_url, request_credentials = self._creds_provider.credentials, wait_time=20):
                     if self._process_msg(msg, shelf):
                         self.sqs_client.delete_message(self.queue_url, msg.receipt_handle, request_credentials = self._creds_provider.credentials)
             except FatalUpdateError:

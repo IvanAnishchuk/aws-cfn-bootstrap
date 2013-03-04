@@ -18,12 +18,10 @@
 from cfnbootstrap import util
 from optparse import OptionParser
 import base64
-import platform
 import re
 import requests
 import socket
 import sys
-import time
 try:
     import simplejson as json
 except ImportError:
@@ -34,6 +32,7 @@ if not default_id:
     default_id = socket.getfqdn()
 
 parser = OptionParser(usage="usage: %prog [options] [WaitConditionHandle URL]")
+parser.add_option_group(util.get_proxy_options(parser))
 parser.add_option("-s", "--success", help="If true, signal success to CloudFormation; if false, signal failure. Default: true",
                         dest="success", action="store", type="choice", choices=["true", "false"],  default="true")
 parser.add_option("-r", "--reason", help="The reason for success/failure", dest="reason", type="string", action="store", default="")
@@ -79,7 +78,8 @@ def send(url, data):
                  data=json.dumps(data),
                  headers={"Content-Type" : ""},
                  verify=util.get_cert(),
-                 config={'danger_mode' : True})
+                 config={'danger_mode' : True},
+                 proxies=util.get_proxyinfo(options))
 
 try:
     send(url, data)

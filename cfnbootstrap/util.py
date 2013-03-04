@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+from optparse import OptionGroup
 from requests.exceptions import ConnectionError, HTTPError, Timeout, \
     RequestException, SSLError
 import StringIO
@@ -32,100 +33,11 @@ except ImportError:
     import json
 
 log = logging.getLogger("cfn.init")
+wire_log = logging.getLogger("wire")
 
-def main_is_frozen():
-    return (hasattr(sys, "frozen") or # new py2exe
-            hasattr(sys, "importers") # old py2exe
-            or imp.is_frozen("__main__")) # tools/freeze
-
-def get_cert():
-    if main_is_frozen():
-        return os.path.join(os.path.dirname(sys.executable), 'cacert.pem')
-    return True # True tells Requests to find its own cert
-
-def get_instance_identity_document():
-    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document').text.rstrip()
-
-def get_instance_identity_signature():
-    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature').text.rstrip()
-
-_instance_id = '__unset'
-
-def get_instance_id():
-    """
-    Attempt to retrieve an EC2 instance id, returning None if this is not EC2
-    """
-    global _instance_id
-    if _instance_id == '__unset':
-        try:
-            _instance_id = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2, config={'danger_mode' : True}).text.strip()
-        except RequestException:
-            log.exception("Exception retrieving InstanceId")
-            _instance_id =  None
-
-    return _instance_id
-
-def is_ec2():
-    return get_instance_id() != None
-
-_trues = frozenset([True, 1, 'true', 'yes', 'y', '1'])
-
-def interpret_boolean(input):
-    """
-    This tries to interpret if the user intended True
-    I don't use python's boolean equivalent because it's
-    likely that we're getting a string
-    """
-    if not input:
-        return False
-
-    input = input.lower().strip() if isinstance(input, basestring) else input
-
-    return input in _trues
-
-def extract_credentials(path):
-    """
-    Extract credentials from a file at path, returning tuple of (access_key, secret_key)
-    Raises an exception if the file is readable by group or other.
-    """
-    if not os.path.isfile(path):
-        raise IOError(None, "Credential file was not found at %s" % path)
-
-    if os.name == 'posix':
-        mode = os.stat(path)[stat.ST_MODE]
-
-        if stat.S_IRWXG & mode or stat.S_IRWXO & mode:
-            raise IOError(None, "Credential file cannot be accessible by group or other. Please chmod 600 the credential file.")
-
-    access_key, secret_key = '', ''
-    with file(path, 'r') as f:
-        for line in (line.strip() for line in f):
-            if line.startswith("AWSAccessKeyId="):
-                access_key = line.partition('=')[2]
-            elif line.startswith("AWSSecretKey="):
-                secret_key = line.partition('=')[2]
-
-    if not access_key or not secret_key:
-        raise IOError(None, "Credential file must contain the keys 'AWSAccessKeyId' and 'AWSSecretKey'")
-
-    return (access_key, secret_key)
-
-_dot_split = re.compile(r'(?<!\\)\.')
-_slash_replace = re.compile(r'\\(?=\.)')
-
-def extract_value(metadata, path):
-    """Returns a value from metadata (a dict) at a (possibly empty) path, where path is in dotted object syntax (like root.child.leaf)"""
-    if not path:
-        return metadata
-
-    return_data = metadata
-    for element in (_slash_replace.sub('', s) for s in _dot_split.split(path)):
-        if not element in return_data:
-            log.debug("No value at path %s (missing index: %s)", path, element)
-            return None
-        return_data = return_data[element]
-
-    return return_data
+#==============================================================================
+# HTTP backoff-and-retry
+#==============================================================================
 
 def exponential_backoff(max_tries):
     """
@@ -192,10 +104,182 @@ def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
         return _retry
     return _decorate
 
+#==============================================================================
+# Certificate loading
+#==============================================================================
+
+def main_is_frozen():
+    return (hasattr(sys, "frozen") or # new py2exe
+            hasattr(sys, "importers") # old py2exe
+            or imp.is_frozen("__main__")) # tools/freeze
+
+def get_cert():
+    if main_is_frozen():
+        return os.path.join(os.path.dirname(sys.executable), 'cacert.pem')
+    return True # True tells Requests to find its own cert
+
+#==============================================================================
+# Instance metadata
+#==============================================================================
+
+@retry_on_failure(max_tries=3)
+def get_instance_identity_document():
+    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document', config={'danger_mode' : True}).text.rstrip()
+
+@retry_on_failure(max_tries=3)
+def get_instance_identity_signature():
+    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature', config={'danger_mode' : True}).text.rstrip()
+
+_instance_id = '__unset'
+
+@retry_on_failure(max_tries=3)
+def _fetch_instance_id():
+    return requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2, config={'danger_mode' : True}).text.strip()
+
+def get_instance_id():
+    """
+    Attempt to retrieve an EC2 instance id, returning None if this is not EC2
+    """
+    global _instance_id
+    if _instance_id == '__unset':
+        try:
+            _instance_id = _fetch_instance_id()
+        except IOError:
+            log.exception("Exception retrieving InstanceId")
+            _instance_id =  None
+
+    return _instance_id
+
+def is_ec2():
+    return get_instance_id() is not None
+
+@retry_on_failure(max_tries=3)
+def get_role_creds(name):
+    role = json_from_response(requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name, config={'danger_mode' : True}))
+    return role['AccessKeyId'], role['SecretAccessKey'], role['Token']
+
+_trues = frozenset([True, 1, 'true', 'yes', 'y', '1'])
+
+#==============================================================================
+# Miscellaneous
+#==============================================================================
+
+def interpret_boolean(input):
+    """
+    This tries to interpret if the user intended True
+    I don't use python's boolean equivalent because it's
+    likely that we're getting a string
+    """
+    if not input:
+        return False
+
+    input = input.lower().strip() if isinstance(input, basestring) else input
+
+    return input in _trues
+
+_dot_split = re.compile(r'(?<!\\)\.')
+_slash_replace = re.compile(r'\\(?=\.)')
+
+def extract_value(metadata, path):
+    """Returns a value from metadata (a dict) at a (possibly empty) path, where path is in dotted object syntax (like root.child.leaf)"""
+    if not path:
+        return metadata
+
+    return_data = metadata
+    for element in (_slash_replace.sub('', s) for s in _dot_split.split(path)):
+        if not element in return_data:
+            log.debug("No value at path %s (missing index: %s)", path, element)
+            return None
+        return_data = return_data[element]
+
+    return return_data
+
 def json_from_response(resp):
     if hasattr(resp, 'json'):
         return resp.json
     return json.load(StringIO.StringIO(resp.content))
+
+#==============================================================================
+# Command-line (credentials, options, etc)
+#==============================================================================
+
+def get_proxy_options(parser):
+    proxy_group = OptionGroup(parser, "Proxy", "Options for specifying proxies. Format: [scheme://][user:password@]host:port")
+
+    proxy_group.add_option("", "--http-proxy", help="A (non-SSL) HTTP proxy", type="string", dest="http_proxy")
+    proxy_group.add_option("", "--https-proxy", help="An HTTPS proxy", type="string", dest="https_proxy")
+
+    return proxy_group
+
+def get_proxyinfo(options):
+    return_info = {}
+    if options.http_proxy:
+        return_info['http'] = options.http_proxy
+    if options.https_proxy:
+        return_info['https'] = options.https_proxy
+
+    return return_info if return_info else None
+
+def get_cred_options(parser):
+    creds_group = OptionGroup(parser, "AWS Credentials", "Options for specifying AWS Account Credentials.")
+
+    creds_group.add_option("-f", "--credential-file", help="A credential file, readable only by the owner, with keys "
+                                                           "'AWSAccessKeyId' and 'AWSSecretKey'",
+                           type="string", dest="credential_file")
+
+    creds_group.add_option("", "--role", help="An IAM Role",
+        type="string", dest="iam_role")
+
+    creds_group.add_option("", "--access-key", help="An AWS Access Key",
+                           type="string", dest="access_key")
+    creds_group.add_option("", "--secret-key", help="An AWS Secret Key",
+                           type="string", dest="secret_key")
+
+    return creds_group
+
+def get_creds_or_die(options):
+    if options.credential_file:
+        try:
+            return extract_credentials(options.credential_file)
+        except IOError, e:
+            print >> sys.stderr, "Error retrieving credentials from file:\n\t%s" % e.strerror
+            sys.exit(1)
+    elif options.iam_role:
+        return Credentials(*get_role_creds(options.iam_role))
+    else:
+        return Credentials(options.access_key, options.secret_key)
+
+
+def extract_credentials(path):
+    """
+    Extract credentials from a file at path, returning tuple of (access_key, secret_key)
+    Raises an exception if the file is readable by group or other.
+    """
+    if not os.path.isfile(path):
+        raise IOError(None, "Credential file was not found at %s" % path)
+
+    if os.name == 'posix':
+        mode = os.stat(path)[stat.ST_MODE]
+
+        if stat.S_IRWXG & mode or stat.S_IRWXO & mode:
+            raise IOError(None, "Credential file cannot be accessible by group or other. Please chmod 600 the credential file.")
+
+    access_key, secret_key = '', ''
+    with file(path, 'r') as f:
+        for line in (line.strip() for line in f):
+            if line.startswith("AWSAccessKeyId="):
+                access_key = line.partition('=')[2]
+            elif line.startswith("AWSSecretKey="):
+                secret_key = line.partition('=')[2]
+
+    if not access_key or not secret_key:
+        raise IOError(None, "Credential file must contain the keys 'AWSAccessKeyId' and 'AWSSecretKey'")
+
+    return Credentials(access_key, secret_key)
+
+#==============================================================================
+# Process running utilities
+#==============================================================================
 
 class ProcessResult(object):
     """
@@ -248,3 +332,40 @@ class ProcessHelper(object):
         returnData = process.communicate()
 
         return ProcessResult(process.returncode, returnData[0], returnData[1])
+
+
+class Credentials(object):
+    '''
+    AWS Credentials
+    '''
+
+    def __init__(self, access_key, secret_key, security_token=None, expiration=None):
+        self._access_key = access_key
+        self._secret_key = secret_key
+        self._security_token = security_token
+        self._expiration = expiration
+
+    @property
+    def access_key(self):
+        return self._access_key
+
+    @property
+    def secret_key(self):
+        return self._secret_key
+
+    @property
+    def security_token(self):
+        return self._security_token
+
+    @property
+    def expiration(self):
+        return self._expiration
+
+
+def log_request(req):
+    wire_log.debug('Request: %s %s [headers: %s]', req.method, req.full_url, req.headers)
+
+def log_response(resp):
+    wire_log.debug('Response: %s %s [headers: %s]', resp.status_code, resp.url, resp.headers)
+    if not resp.ok:
+        wire_log.debug('Response error: %s', resp.content)

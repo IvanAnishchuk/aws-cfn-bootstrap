@@ -20,8 +20,14 @@ import base64
 import logging
 import os
 import requests
-import shutil
 import stat
+
+_templates_supported = True
+try:
+    from pystache.renderer import Renderer
+except ImportError:
+    _templates_supported = False
+
 try:
     import simplejson as json
 except ImportError:
@@ -29,13 +35,14 @@ except ImportError:
 
 log = logging.getLogger("cfn.init")
 
+
 class FileTool(object):
     """
     Writes files to disk
 
     """
 
-    _compare_buffer = 8*1024
+    _compare_buffer = 8 * 1024
 
     @classmethod
     def is_same_file(cls, f1, f2):
@@ -59,7 +66,7 @@ class FileTool(object):
         # Borrowed from filecmp
         with file(f1, 'rb') as fp1:
             with file(f2, 'rb') as fp2:
-                bufsize = 8*1024
+                bufsize = 8 * 1024
                 while True:
                     b1 = fp1.read(bufsize)
                     b2 = fp2.read(bufsize)
@@ -87,6 +94,10 @@ class FileTool(object):
             return files_changed
 
         for (filename, attribs) in sorted(action.iteritems(), key=lambda pair: pair[0]):
+            if not os.path.isabs(filename):
+                raise ToolError('File specified with non-absolute path: %s' % filename)
+
+
             # The only difference between a file and a symlink is hidden in the mode
             file_is_link = "mode" in attribs and stat.S_ISLNK(int(attribs["mode"], 8))
 
@@ -110,7 +121,7 @@ class FileTool(object):
                     log.debug("%s is specified as a symbolic link to %s", filename, attribs['content'])
                     os.symlink(attribs["content"], filename)
                 else:
-                    with file(filename, 'wb') as f:
+                    with file(filename, 'w' + ('' if 'content' in attribs else 'b')) as f:
                         log.debug("Writing content to %s", filename)
                         self._write_file(f, attribs, auth_config)
 
@@ -175,7 +186,8 @@ class FileTool(object):
     def _write_file(self, dest_fileobj, attribs, auth_config):
         content = attribs.get("content", "")
         if content:
-            self._write_inline_content(dest_fileobj, content, attribs.get("encoding", "plain") == "base64")
+            self._write_inline_content(dest_fileobj, content, attribs.get("encoding", "plain") == "base64",
+                                       attribs.get('context'))
         else:
             source = attribs.get("source", "")
             if not source:
@@ -183,20 +195,36 @@ class FileTool(object):
             log.debug("Retrieving contents from %s", source)
 
             try:
-                self._get_remote_file(source, auth_config.get_auth(attribs.get('authentication', None)), dest_fileobj)
+                self._get_remote_file(source, auth_config.get_auth(attribs.get('authentication', None)), dest_fileobj,
+                                      attribs.get('context'))
             except IOError, e:
                 raise ToolError("Failed to retrieve %s: %s" % (source, e.strerror))
 
+    def render_template(self, content, context):
+        if context is None:
+            return content
+
+        if not _templates_supported:
+            raise ToolError("Pystache must be installed in order to render files as Mustache templates")
+
+        log.debug('Rendering as Mustache template')
+        try:
+            return Renderer(string_encoding='utf-8', file_encoding='utf-8').render(content, context)
+        except Exception, e:
+            raise ToolError("Failed to render content as a Mustache template: %s" % e.message)
+
     @util.retry_on_failure()
-    def _get_remote_file(self, source, auth, dest):
+    def _get_remote_file(self, source, auth, dest, context):
         remote_contents = requests.get(source,
                                        auth=auth,
                                        verify=util.get_cert(),
                                        prefetch=False,
-                                       config={'danger_mode' : True})
-        dest.write(remote_contents.content)
+                                       hooks=dict(pre_request=util.log_request, response=util.log_response),
+                                       config={'danger_mode': True})
 
-    def _write_inline_content(self, dest, content, is_base64):
+        dest.write(self.render_template(remote_contents.content, context))
+
+    def _write_inline_content(self, dest, content, is_base64, context):
         if not isinstance(content, basestring):
             log.debug('Content will be serialized as a JSON structure')
             json.dump(content, dest)
@@ -209,4 +237,4 @@ class FileTool(object):
             except TypeError:
                 raise ToolError("Malformed base64: %s" % content)
 
-        dest.write(content)
+        dest.write(self.render_template(content, context))

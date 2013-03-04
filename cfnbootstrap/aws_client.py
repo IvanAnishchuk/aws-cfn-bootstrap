@@ -184,44 +184,7 @@ class V4Signer(Signer):
 
         sorted_entries = sorted(canon_headers.iteritems(), key=operator.itemgetter(0))
 
-        return ('\n'.join((':'.join(entry) for entry in sorted_entries)) + '\n', ';'.join((entry[0] for entry in sorted_entries)))
-
-
-class Credentials(object):
-    '''
-    AWS Credentials
-    '''
-
-    def __init__(self, access_key, secret_key, security_token=None, expiration=None):
-        self._access_key = access_key
-        self._secret_key = secret_key
-        self._security_token = security_token
-        self._expiration = expiration
-
-    @property
-    def access_key(self):
-        return self._access_key
-
-    @property
-    def secret_key(self):
-        return self._secret_key
-
-    @property
-    def security_token(self):
-        return self._security_token
-
-    @property
-    def expiration(self):
-        return self._expiration
-
-    @classmethod
-    def from_response(cls, resp):
-        body = util.json_from_response(resp)['GetListenerCredentialsResponse']['GetListenerCredentialsResult']['Credentials']
-        return Credentials(body['AccessKeyId'],
-                           body['SecretAccessKey'],
-                           body['SessionToken'],
-                           datetime.datetime.utcfromtimestamp(body['Expiration']))
-
+        return '\n'.join((':'.join(entry) for entry in sorted_entries)) + '\n', ';'.join((entry[0] for entry in sorted_entries))
 
 
 class AwsQueryError(util.RemoteError):
@@ -245,12 +208,13 @@ class Client(object):
     A base AWS/QUERY client
     '''
 
-    def __init__(self, credentials, is_json, endpoint=None, signer=V2Signer(), xmlns=None):
+    def __init__(self, credentials, is_json, endpoint=None, signer=V2Signer(), xmlns=None, proxyinfo=None):
         self._credentials = credentials
         self._endpoint = endpoint
         self._is_json = is_json
         self._xmlns = xmlns
         self._signer = signer
+        self._proxyinfo = dict(proxyinfo) if proxyinfo else None
 
     @staticmethod
     def _extract_json_message(resp):
@@ -279,19 +243,24 @@ class Client(object):
 
         return _extract_xml_message
 
-    def _call(self, params, endpoint=None, request_credentials=None, verb='GET'):
+    def _call(self, params, endpoint=None, request_credentials=None, verb='GET', timeout=None):
         base = endpoint if endpoint else self._endpoint
         creds = request_credentials if request_credentials else self._credentials
         accept_type = "application/json" if self._is_json else "application/xml"
         req = self._signer.sign(verb, base, params, creds, {"Accept" : accept_type})
 
-        return self._make_request(*req)
+        return self._make_request(*req, timeout=timeout)
 
-    def _make_request(self, verb, base_url, params, headers):
+    def _make_request(self, verb, base_url, params, headers, timeout=None):
+        headers = dict(headers) if headers else {}
+        headers['User-Agent'] = 'CloudFormation Tools'
         return api.request(verb, base_url,
                            data=params if verb=='POST' else dict(),
                            params=params if verb!='POST' else dict(),
                            headers=headers,
                            verify=util.get_cert(),
                            prefetch=False,
-                           config={'danger_mode' : True})
+                           config={'danger_mode' : True},
+                           proxies=self._proxyinfo,
+                           hooks=dict(pre_request=util.log_request, response=util.log_response),
+                           timeout=timeout)

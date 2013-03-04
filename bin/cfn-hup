@@ -100,7 +100,7 @@ def main():
                 last_log = datetime.datetime.utcnow()
                 logging.info("command processing is alive.")
 
-            delay = 1
+            delay = 0
             try:
                 if not cmd_processor.is_registered():
                     cmd_processor.register()
@@ -114,7 +114,11 @@ def main():
                 fatal_event.set()
             except Exception, e:
                 logging.exception("Unhandled exception")
-            threading.Timer(delay, do_cmd_process, (), {'last_log' : last_log}).start()
+
+            if delay > 0:
+                threading.Timer(delay, do_cmd_process, (), {'last_log' : last_log}).start()
+            else:
+                threading.Thread(target=do_cmd_process, args=(), kwargs={'last_log' : last_log}).start()
 
         if processor:
             do_process()

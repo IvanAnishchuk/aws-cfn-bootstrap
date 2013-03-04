@@ -26,8 +26,8 @@ if sys.version_info[0] == 2 and sys.version_info[1] < 6:
         print >> sys.stderr, "Python 2.6+ is required"
         sys.exit(1)
 
-rpm_requires = ['python >= 2.6', 'python-daemon', 'python-requests']
-dependencies = ['python-daemon>=1.5.2', 'requests>=0.11.1,<1.0.0']
+rpm_requires = ['python >= 2.6', 'python-daemon', 'python-requests', 'pystache']
+dependencies = ['python-daemon>=1.5.2', 'requests>=0.11.1,<1.0.0', 'pystache>=0.4.0']
 
 _distclass = Distribution
 _opts = {
@@ -54,7 +54,7 @@ try:
                         'typelibs' : [('{000C1092-0000-0000-C000-000000000046}', 1033, 1, 0),
                                       ('{E34CB9F1-C7F7-424C-BE29-027DCC09363A}', 0, 1, 0)],
                         'excludes' : ['certifi', 'pyreadline', 'difflib', 'distutils', 'doctest', 'pdb', 'inspect', 'unittest', 'adodbapi'],
-                        'includes' : ['chardet', 'dbhash'],
+                        'includes' : ['chardet', 'dbhash', 'dumbdbm'],
                         'dll_excludes' : ['msvcr71.dll', 'w9xpopen.exe', ''],
                         'compressed' : True,
                       }

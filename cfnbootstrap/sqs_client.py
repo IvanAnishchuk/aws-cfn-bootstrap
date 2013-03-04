@@ -40,16 +40,16 @@ class SQSClient(aws_client.Client):
 
     """
 
-    _apiVersion = "2011-10-01"
+    _apiVersion = "2012-11-05"
     _xmlns='http://queue.amazonaws.com/doc/%s/' % _apiVersion
 
-    def __init__(self, credentials, url=None):
+    def __init__(self, credentials, url=None, proxyinfo=None):
         if not url:
             endpoint = SQSClient.endpointForRegion('us-east-1')
         else:
             endpoint = self._fix_endpoint(url)
 
-        super(SQSClient, self).__init__(credentials, False, endpoint, xmlns='http://queue.amazonaws.com/doc/%s/' % SQSClient._apiVersion)
+        super(SQSClient, self).__init__(credentials, False, endpoint, xmlns='http://queue.amazonaws.com/doc/%s/' % SQSClient._apiVersion, proxyinfo=proxyinfo)
         log.debug("SQS client initialized with endpoint %s", endpoint)
 
     # SQS SSL certificates have CNs based on queue.amazonaws.com
@@ -70,12 +70,14 @@ class SQSClient(aws_client.Client):
         return 'https://%s.queue.amazonaws.com' % region
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
-    def receive_message(self, queue_url, attributes=['All'], max_messages=1, visibility_timeout=None, request_credentials=None):
+    def receive_message(self, queue_url, attributes=None, max_messages=1, visibility_timeout=None,
+                              request_credentials=None, wait_time=None):
         """
         Calls ReceiveMessage and returns a list of Message objects
 
         Throws an IOError on failure.
         """
+        if not attributes: attributes = ['All']
         queue_url = self._fix_endpoint(queue_url)
         log.debug("Receiving messages for queue %s", queue_url)
 
@@ -84,8 +86,12 @@ class SQSClient(aws_client.Client):
             params['AttributeName.%s' % (i + 1)]=attributes[i]
         if visibility_timeout:
             params['VisibilityTimeout'] = str(visibility_timeout)
+        if wait_time:
+            params['WaitTimeSeconds'] = str(wait_time)
 
-        return Message._parse_list(StringIO.StringIO(self._call(params, queue_url, request_credentials).content), self._xmlns)
+        response_content = self._call(params, queue_url, request_credentials,
+                                      timeout=wait_time + 3 if wait_time else None).content
+        return Message._parse_list(StringIO.StringIO(response_content), self._xmlns)
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
     def send_message(self, queue_url, message_body, delay_seconds=None, request_credentials=None):

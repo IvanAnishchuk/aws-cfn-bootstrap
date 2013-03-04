@@ -15,12 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
-from cfnbootstrap.aws_client import Credentials
 from cfnbootstrap.sqs_client import SQSClient
-from cfnbootstrap import util
 from optparse import OptionParser
 import os
 import sys
+from cfnbootstrap import util
 
 try:
     import simplejson as json
@@ -28,6 +27,9 @@ except ImportError:
     import json
 
 parser = OptionParser(usage="usage: %prog [options] [Command Result Data]")
+
+parser.add_option_group(util.get_proxy_options(parser))
+
 parser.add_option("", "--access-key", help="An AWS Access Key",
                        type="string", dest="access_key", default=os.environ.get('RESULT_ACCESS_KEY'))
 parser.add_option("", "--secret-key", help="An AWS Secret Key",
@@ -86,9 +88,9 @@ result_msg = {
               'Status' : 'SUCCESS' if success else 'FAILURE',
               }
 
-client = SQSClient(Credentials(options.access_key, options.secret_key, options.security_token))
+client = SQSClient(util.Credentials(options.access_key, options.secret_key, options.security_token), proxyinfo=util.get_proxyinfo(options))
 try:
-    client.send_message(options.queue_url,json.dumps(result_msg))
+    client.send_message(options.queue_url, json.dumps(result_msg))
 except Exception, e:
     print >> sys.stderr, "Error: Could not send command result: " + str(e)
     sys.exit(1)

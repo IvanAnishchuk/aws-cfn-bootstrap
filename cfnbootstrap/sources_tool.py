@@ -75,7 +75,7 @@ class SourcesTool(object):
                 log.debug("Treating %s as a zip archive", archive)
                 archive_wrapper = ZipWrapper(archive_file)
             else:
-                raise ToolError("Unsupported source file (not zip or tarball): %s")
+                raise ToolError("Unsupported source file (not zip or tarball): %s" % archive)
 
             log.debug("Checking to ensure that all archive members fall under path %s" % path)
             self._check_all_members_in_path(path, archive_wrapper)
@@ -142,6 +142,7 @@ class SourcesTool(object):
                                        auth=auth_config.get_auth(None),
                                        verify=util.get_cert(),
                                        prefetch=False,
+                                       hooks=dict(pre_request=util.log_request, response=util.log_response),
                                        config={'danger_mode' : True})
         tf.write(remote_contents.content)
         tf.flush()

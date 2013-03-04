@@ -27,6 +27,8 @@ from cfnbootstrap.util import retry_on_failure
 import datetime
 import logging
 import re
+from util import Credentials
+
 try:
     import simplejson as json
 except ImportError:
@@ -46,7 +48,7 @@ class CloudFormationClient(aws_client.Client):
 
     _apiVersion = "2010-05-15"
 
-    def __init__(self, credentials, url=None, region='us-east-1'):
+    def __init__(self, credentials, url=None, region='us-east-1', proxyinfo=None):
 
         if not url:
             endpoint = CloudFormationClient.endpointForRegion(region)
@@ -64,7 +66,7 @@ class CloudFormationClient(aws_client.Client):
 
         signer = CFNSigner() if self._using_instance_identity else V4Signer(region, 'cloudformation')
 
-        super(CloudFormationClient, self).__init__(credentials, True, endpoint, signer)
+        super(CloudFormationClient, self).__init__(credentials, True, endpoint, signer, proxyinfo=proxyinfo)
 
         log.debug("CloudFormation client initialized with endpoint %s", endpoint)
 
@@ -153,7 +155,12 @@ class CloudFormationClient(aws_client.Client):
         if not self._using_instance_identity:
             params["ListenerId"] = listener_id
 
-        return aws_client.Credentials.from_response(self._call(params, request_credentials = request_credentials))
+        resp = self._call(params, request_credentials = request_credentials)
+        body = util.json_from_response(resp)['GetListenerCredentialsResponse']['GetListenerCredentialsResult']['Credentials']
+        return Credentials(body['AccessKeyId'],
+            body['SecretAccessKey'],
+            body['SessionToken'],
+            datetime.datetime.utcfromtimestamp(body['Expiration']))
 
 
 class Listener(object):
