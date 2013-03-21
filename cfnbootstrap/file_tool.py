@@ -215,12 +215,9 @@ class FileTool(object):
 
     @util.retry_on_failure()
     def _get_remote_file(self, source, auth, dest, context):
-        remote_contents = requests.get(source,
-                                       auth=auth,
-                                       verify=util.get_cert(),
-                                       prefetch=False,
-                                       hooks=dict(pre_request=util.log_request, response=util.log_response),
-                                       config={'danger_mode': True})
+
+        remote_contents = util.check_status(requests.get(source,
+                                                **util.req_opts({'auth' : auth})))
 
         dest.write(self.render_template(remote_contents.content, context))
 

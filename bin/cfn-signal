@@ -78,8 +78,7 @@ def send(url, data):
                  data=json.dumps(data),
                  headers={"Content-Type" : ""},
                  verify=util.get_cert(),
-                 config={'danger_mode' : True},
-                 proxies=util.get_proxyinfo(options))
+                 proxies=util.get_proxyinfo(options)).raise_for_status()
 
 try:
     send(url, data)

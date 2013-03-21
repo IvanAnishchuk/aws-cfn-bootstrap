@@ -138,12 +138,8 @@ class SourcesTool(object):
     @retry_on_failure()
     def _archive_from_url(self, archive, auth_config):
         tf = tempfile.TemporaryFile()
-        remote_contents = requests.get(archive,
-                                       auth=auth_config.get_auth(None),
-                                       verify=util.get_cert(),
-                                       prefetch=False,
-                                       hooks=dict(pre_request=util.log_request, response=util.log_response),
-                                       config={'danger_mode' : True})
+        remote_contents = util.check_status(requests.get(archive,
+                                                         **util.req_opts({'auth' : auth_config.get_auth(None)})))
         tf.write(remote_contents.content)
         tf.flush()
         tf.seek(0, os.SEEK_SET)

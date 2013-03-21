@@ -15,7 +15,7 @@
 #==============================================================================
 from optparse import OptionGroup
 from requests.exceptions import ConnectionError, HTTPError, Timeout, \
-    RequestException, SSLError
+    SSLError
 import StringIO
 import imp
 import logging
@@ -27,6 +27,7 @@ import stat
 import subprocess
 import sys
 import time
+
 try:
     import simplejson as json
 except ImportError:
@@ -124,17 +125,23 @@ def get_cert():
 
 @retry_on_failure(max_tries=3)
 def get_instance_identity_document():
-    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document', config={'danger_mode' : True}).text.rstrip()
+    resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document')
+    resp.raise_for_status()
+    return resp.text.rstrip()
 
 @retry_on_failure(max_tries=3)
 def get_instance_identity_signature():
-    return requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature', config={'danger_mode' : True}).text.rstrip()
+    resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature')
+    resp.raise_for_status()
+    return resp.text.rstrip()
 
 _instance_id = '__unset'
 
 @retry_on_failure(max_tries=3)
 def _fetch_instance_id():
-    return requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2, config={'danger_mode' : True}).text.strip()
+    resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2)
+    resp.raise_for_status()
+    return resp.text.strip()
 
 def get_instance_id():
     """
@@ -155,7 +162,9 @@ def is_ec2():
 
 @retry_on_failure(max_tries=3)
 def get_role_creds(name):
-    role = json_from_response(requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name, config={'danger_mode' : True}))
+    resp = requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name)
+    resp.raise_for_status()
+    role = json_from_response(resp)
     return role['AccessKeyId'], role['SecretAccessKey'], role['Token']
 
 _trues = frozenset([True, 1, 'true', 'yes', 'y', '1'])
@@ -196,6 +205,8 @@ def extract_value(metadata, path):
 
 def json_from_response(resp):
     if hasattr(resp, 'json'):
+        if callable(resp.json):
+            return resp.json()
         return resp.json
     return json.load(StringIO.StringIO(resp.content))
 
@@ -369,3 +380,23 @@ def log_response(resp):
     wire_log.debug('Response: %s %s [headers: %s]', resp.status_code, resp.url, resp.headers)
     if not resp.ok:
         wire_log.debug('Response error: %s', resp.content)
+#==============================================================================
+# Requests compat
+#==============================================================================
+
+_IS_NEW_REQUESTS = tuple(int(v) for v in requests.__version__.split('.')) >= (1, 0, 0)
+
+def req_opts(kwargs):
+    kwargs = dict(kwargs) if kwargs else {}
+    kwargs['verify'] = get_cert()
+    kwargs['hooks'] = dict(pre_request=log_request, response=log_response)
+    if _IS_NEW_REQUESTS:
+        kwargs['stream'] = True
+    else:
+        kwargs['prefetch'] = False
+
+    return kwargs
+
+def check_status(resp):
+    resp.raise_for_status()
+    return resp

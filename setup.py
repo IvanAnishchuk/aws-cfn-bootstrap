@@ -27,7 +27,7 @@ if sys.version_info[0] == 2 and sys.version_info[1] < 6:
         sys.exit(1)
 
 rpm_requires = ['python >= 2.6', 'python-daemon', 'python-requests', 'pystache']
-dependencies = ['python-daemon>=1.5.2', 'requests>=0.11.1,<1.0.0', 'pystache>=0.4.0']
+dependencies = ['python-daemon>=1.5.2', 'requests>=0.11.1', 'pystache>=0.4.0']
 
 _distclass = Distribution
 _opts = {

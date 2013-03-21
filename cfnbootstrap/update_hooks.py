@@ -55,11 +55,11 @@ def parse_config(config_path):
 
     if main_config.has_option('main', 'credential-file'):
         try:
-            access_key, secret_key = util.extract_credentials(main_config.get('main', 'credential-file'))
+            credentials = util.extract_credentials(main_config.get('main', 'credential-file'))
         except IOError, e:
             raise ValueError("Could not retrieve credentials from file:\n\t%s" % e.strerror)
     else:
-        access_key, secret_key = ('', '')
+        credentials = Credentials('', '')
 
     additional_hooks_path = os.path.join(config_path, 'hooks.d')
     additional_files = []
@@ -122,7 +122,7 @@ def parse_config(config_path):
     if main_config.has_option('main', 'url'):
         cfn_url = main_config.get('main', 'url')
 
-    cfn_client = CloudFormationClient(Credentials(access_key, secret_key), cfn_url, region)
+    cfn_client = CloudFormationClient(credentials, cfn_url, region)
 
     if hooks:
         processor = HookProcessor(hooks, stack, cfn_client)
@@ -134,10 +134,10 @@ def parse_config(config_path):
         if main_config.has_option('main', 'sqs_url'):
             sqs_url = main_config.get('main', 'sqs_url')
 
-        sqs_client = SQSClient(Credentials(access_key, secret_key), sqs_url)
+        sqs_client = SQSClient(credentials, sqs_url)
 
         cmd_processor = CmdProcessor(stack, cmd_hooks, sqs_client,
-                                     CloudFormationClient(Credentials(access_key, secret_key), cfn_url, region))
+                                     CloudFormationClient(credentials, cfn_url, region))
     else:
         cmd_processor = None
 

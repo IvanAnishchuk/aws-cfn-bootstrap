@@ -94,12 +94,9 @@ class MsiTool(object):
     @util.retry_on_failure()
     def _msi_from_url(self, archive, auth_config):
         tf = tempfile.mkstemp(suffix='.msi', prefix='cfn-init-tmp')
-        remote_contents = requests.get(archive,
-                                       auth=auth_config.get_auth(None),
-                                       verify=util.get_cert(),
-                                       prefetch=False,
-                                       hooks=dict(pre_request=util.log_request, response=util.log_response),
-                                       config={'danger_mode' : True})
+
+        remote_contents = util.check_status(requests.get(archive,
+                                                **util.req_opts({'auth' : auth_config.get_auth(None)})))
         with os.fdopen(tf[0], 'wb') as temp_dest:
             temp_dest.write(remote_contents.content)
 

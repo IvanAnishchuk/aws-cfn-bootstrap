@@ -114,7 +114,8 @@ class V4Signer(Signer):
         self._service = service
         self._terminator = terminator
 
-    def sign(self, verb, base_url, params, creds, in_headers={}, timestamp=None):
+    def sign(self, verb, base_url, params, creds, in_headers=None, timestamp=None):
+        if not in_headers: in_headers = {}
         base_url = self._normalize_url(base_url)
 
         if not timestamp:
@@ -254,13 +255,11 @@ class Client(object):
     def _make_request(self, verb, base_url, params, headers, timeout=None):
         headers = dict(headers) if headers else {}
         headers['User-Agent'] = 'CloudFormation Tools'
-        return api.request(verb, base_url,
-                           data=params if verb=='POST' else dict(),
-                           params=params if verb!='POST' else dict(),
-                           headers=headers,
-                           verify=util.get_cert(),
-                           prefetch=False,
-                           config={'danger_mode' : True},
-                           proxies=self._proxyinfo,
-                           hooks=dict(pre_request=util.log_request, response=util.log_response),
-                           timeout=timeout)
+        return util.check_status(api.request(verb, base_url,
+                           **util.req_opts({
+                            'data' : params if verb=='POST' else dict(),
+                            'params' : params if verb!='POST' else dict(),
+                            'headers' : headers,
+                            'proxies' : self._proxyinfo,
+                            'timeout' : timeout
+                           })))
