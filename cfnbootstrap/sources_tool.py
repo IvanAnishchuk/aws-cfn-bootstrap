@@ -140,7 +140,8 @@ class SourcesTool(object):
         tf = tempfile.TemporaryFile()
         remote_contents = util.check_status(requests.get(archive,
                                                          **util.req_opts({'auth' : auth_config.get_auth(None)})))
-        tf.write(remote_contents.content)
+        for c in remote_contents.iter_content(10 * 1024):
+            tf.write(c)
         tf.flush()
         tf.seek(0, os.SEEK_SET)
         return tf

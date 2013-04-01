@@ -98,7 +98,8 @@ class MsiTool(object):
         remote_contents = util.check_status(requests.get(archive,
                                                 **util.req_opts({'auth' : auth_config.get_auth(None)})))
         with os.fdopen(tf[0], 'wb') as temp_dest:
-            temp_dest.write(remote_contents.content)
+            for c in remote_contents.iter_content(10 * 1024):
+                temp_dest.write(c)
 
         return tf[1]
 

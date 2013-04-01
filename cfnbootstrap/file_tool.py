@@ -195,15 +195,12 @@ class FileTool(object):
             log.debug("Retrieving contents from %s", source)
 
             try:
-                self._get_remote_file(source, auth_config.get_auth(attribs.get('authentication', None)), dest_fileobj,
+                self._write_remote_file(source, auth_config.get_auth(attribs.get('authentication', None)), dest_fileobj,
                                       attribs.get('context'))
             except IOError, e:
                 raise ToolError("Failed to retrieve %s: %s" % (source, e.strerror))
 
-    def render_template(self, content, context):
-        if context is None:
-            return content
-
+    def _render_template(self, content, context):
         if not _templates_supported:
             raise ToolError("Pystache must be installed in order to render files as Mustache templates")
 
@@ -214,12 +211,15 @@ class FileTool(object):
             raise ToolError("Failed to render content as a Mustache template: %s" % e.message)
 
     @util.retry_on_failure()
-    def _get_remote_file(self, source, auth, dest, context):
-
+    def _write_remote_file(self, source, auth, dest, context):
         remote_contents = util.check_status(requests.get(source,
-                                                **util.req_opts({'auth' : auth})))
+                                                         **util.req_opts({'auth' : auth})))
 
-        dest.write(self.render_template(remote_contents.content, context))
+        if context is None:
+            for c in remote_contents.iter_content(10 * 1024):
+                dest.write(c)
+        else:
+            dest.write(self._render_template(remote_contents.content, context))
 
     def _write_inline_content(self, dest, content, is_base64, context):
         if not isinstance(content, basestring):
@@ -234,4 +234,4 @@ class FileTool(object):
             except TypeError:
                 raise ToolError("Malformed base64: %s" % content)
 
-        dest.write(self.render_template(content, context))
+        dest.write(self._render_template(content, context))
