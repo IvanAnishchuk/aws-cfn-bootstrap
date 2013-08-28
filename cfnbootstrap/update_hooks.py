@@ -261,7 +261,13 @@ class CmdProcessor(object):
         self.hooks = self._hooks_by_path(hooks)
         self.sqs_client = sqs_client
         self.cfn_client = cfn_client
-        self.listener_id = util.get_instance_id() if util.is_ec2() else socket.getfqdn()
+        if util.is_ec2():
+            self.listener_id = util.get_instance_id()
+        elif not cfn_client.using_instance_identity:
+            self.listener_id = socket.getfqdn()
+        else:
+            raise ValueError("Could not retrieve instance id")
+
         self._create_shelf_dir()
         self._creds_provider = AutoRefreshingCredentialsProvider(self.cfn_client, self.stack_name, self.listener_id)
         self.queue_url = None

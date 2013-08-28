@@ -55,16 +55,16 @@ class CloudFormationClient(aws_client.Client):
         else:
             endpoint = url
 
-        self._using_instance_identity = (not credentials or not credentials.access_key) and util.is_ec2()
+        self.using_instance_identity = (not credentials or not credentials.access_key) and util.is_ec2()
 
-        if not self._using_instance_identity:
+        if not self.using_instance_identity:
             if not region:
                 region = CloudFormationClient.regionForEndpoint(endpoint)
 
             if not region:
                 raise ValueError('Region is required for AWS V4 Signatures')
 
-        signer = CFNSigner() if self._using_instance_identity else V4Signer(region, 'cloudformation')
+        signer = CFNSigner() if self.using_instance_identity else V4Signer(region, 'cloudformation')
 
         super(CloudFormationClient, self).__init__(credentials, True, endpoint, signer, proxyinfo=proxyinfo)
 
@@ -111,7 +111,7 @@ class CloudFormationClient(aws_client.Client):
                   "StackName" : stack_name,
                   "ContentType" : "JSON"}
 
-        if not self._using_instance_identity:
+        if not self.using_instance_identity:
             params["ListenerId"] = listener_id
 
         return Listener(self._call(params, request_credentials = request_credentials))
@@ -132,7 +132,7 @@ class CloudFormationClient(aws_client.Client):
                   "StackName" : stack_name,
                   "ContentType" : "JSON"}
 
-        if not self._using_instance_identity:
+        if not self.using_instance_identity:
             params["ListenerId"] = listener_id
 
         result_data = util.json_from_response(self._call(params, request_credentials = request_credentials))
@@ -152,7 +152,7 @@ class CloudFormationClient(aws_client.Client):
                   "StackName" : stack_name,
                   "ContentType" : "JSON"}
 
-        if not self._using_instance_identity:
+        if not self.using_instance_identity:
             params["ListenerId"] = listener_id
 
         resp = self._call(params, request_credentials = request_credentials)

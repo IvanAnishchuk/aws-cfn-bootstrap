@@ -95,11 +95,9 @@ class MsiTool(object):
     def _msi_from_url(self, archive, auth_config):
         tf = tempfile.mkstemp(suffix='.msi', prefix='cfn-init-tmp')
 
-        remote_contents = util.check_status(requests.get(archive,
-                                                **util.req_opts({'auth' : auth_config.get_auth(None)})))
         with os.fdopen(tf[0], 'wb') as temp_dest:
-            for c in remote_contents.iter_content(10 * 1024):
-                temp_dest.write(c)
+            opts = util.req_opts({'auth': auth_config.get_auth(None)})
+            util.EtagCheckedResponse(requests.get(archive, **opts)).write_to(temp_dest)
 
         return tf[1]
 

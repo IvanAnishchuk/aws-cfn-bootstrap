@@ -121,7 +121,8 @@ class FileTool(object):
                     log.debug("%s is specified as a symbolic link to %s", filename, attribs['content'])
                     os.symlink(attribs["content"], filename)
                 else:
-                    with file(filename, 'w' + ('' if 'content' in attribs else 'b')) as f:
+                    file_is_text = 'content' in attribs and not self._is_base64(attribs)
+                    with file(filename, 'w' + ('' if file_is_text else 'b')) as f:
                         log.debug("Writing content to %s", filename)
                         self._write_file(f, attribs, auth_config)
 
@@ -183,10 +184,13 @@ class FileTool(object):
             log.error("Could not move %s to %s", source, dest)
             raise ToolError("Could not rename %s: %s" % (source, str(e)))
 
+    def _is_base64(self, attribs):
+        return attribs.get("encoding", "plain") == "base64"
+
     def _write_file(self, dest_fileobj, attribs, auth_config):
         content = attribs.get("content", "")
         if content:
-            self._write_inline_content(dest_fileobj, content, attribs.get("encoding", "plain") == "base64",
+            self._write_inline_content(dest_fileobj, content, self._is_base64(attribs),
                                        attribs.get('context'))
         else:
             source = attribs.get("source", "")
@@ -212,14 +216,13 @@ class FileTool(object):
 
     @util.retry_on_failure()
     def _write_remote_file(self, source, auth, dest, context):
-        remote_contents = util.check_status(requests.get(source,
-                                                         **util.req_opts({'auth' : auth})))
+        opts = util.req_opts({'auth': auth})
+        remote_contents = util.EtagCheckedResponse(requests.get(source, **opts))
 
         if context is None:
-            for c in remote_contents.iter_content(10 * 1024):
-                dest.write(c)
+            remote_contents.write_to(dest)
         else:
-            dest.write(self._render_template(remote_contents.content, context))
+            dest.write(self._render_template(remote_contents.contents(), context))
 
     def _write_inline_content(self, dest, content, is_base64, context):
         if not isinstance(content, basestring):
@@ -230,8 +233,10 @@ class FileTool(object):
         if is_base64:
             try:
                 log.debug("Decoding base64 content")
-                content = base64.b64decode(content.strip())
+                dest.write(base64.b64decode(content.strip()))
             except TypeError:
                 raise ToolError("Malformed base64: %s" % content)
-
-        dest.write(self._render_template(content, context))
+        elif context is None:
+            dest.write(content)
+        else:
+            dest.write(self._render_template(content, context))

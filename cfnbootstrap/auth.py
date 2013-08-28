@@ -58,7 +58,7 @@ class S3Signer(object):
 
     def _canonicalize_resource(self, req):
         url = urlparse.urlparse(req.full_url if hasattr(req, 'full_url') else req.url)
-        match = re.match(r'^([-\w\.]+?)\.s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
+        match = re.match(r'^([-\w.]+?)\.s3(-[\w\d-]+)?.amazonaws.com$', url.netloc, re.IGNORECASE)
         if match:
             return '/' + match.group(1) + url.path
         return url.path
@@ -79,7 +79,7 @@ class S3DefaultAuth(AuthBase):
 
     def _extract_bucket(self, req):
         url = urlparse.urlparse(req.full_url if hasattr(req, 'full_url') else req.url)
-        match = re.match(r'^([-\w\.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com$', url.netloc)
+        match = re.match(r'^([-\w.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com$', url.netloc, re.IGNORECASE)
         if not match:
             # Not an S3 URL, skip
             return None

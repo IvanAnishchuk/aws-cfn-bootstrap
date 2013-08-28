@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import hashlib
 from optparse import OptionGroup
 from requests.exceptions import ConnectionError, HTTPError, Timeout, \
     SSLError
@@ -40,17 +41,17 @@ wire_log = logging.getLogger("wire")
 # HTTP backoff-and-retry
 #==============================================================================
 
-def exponential_backoff(max_tries):
+def exponential_backoff(max_tries, max_sleep=20):
     """
-    Returns a series of floating point numbers between 0 and 2^i-1 for i in 0 to max_tries
+    Returns a series of floating point numbers between 0 and min(max_sleep, 2^i-1) for i in 0 to max_tries
     """
-    return [random.random() * (2**i - 1) for i in range(0, max_tries)]
+    return [random.random() * min(max_sleep, (2**i - 1)) for i in range(0, max_tries)]
 
-def extend_backoff(durations):
+def extend_backoff(durations, max_sleep=20):
     """
     Adds another exponential delay time to a list of delay times
     """
-    durations.append(random.random() * (2**len(durations) - 1))
+    durations.append(random.random() * min(max_sleep, (2**len(durations) - 1)))
 
 def _extract_http_error(resp):
     if resp.status_code == 503:
@@ -61,6 +62,63 @@ def _extract_http_error(resp):
         retry_mode='RETRIABLE'
 
     return RemoteError(resp.status_code, "HTTP Error %s : %s" % (resp.status_code, resp.text), retry_mode)
+
+class EtagCheckedResponse(object):
+
+    def __init__(self, response):
+        self._response = check_status(response)
+        etag = response.headers['etag'].strip('"') if 'etag' in response.headers and is_s3_url(response.url) else None
+        if etag and '-' in etag:
+            log.warn('cannot check consistency of file uploaded multipart; etag has - character present')
+            etag = None
+
+        self._etag = etag
+        self._digest = hashlib.md5() if self._etag else NoOpDigest()
+
+    def _check_digest(self):
+        if not self._etag:
+            return
+
+        final_digest = self._digest.hexdigest()
+        if self._etag != final_digest:
+            raise ChecksumError("Expected digest %s; received %s" % (self._etag, final_digest))
+
+    def write_to(self, dest):
+        dest.seek(0, 0)
+        dest.truncate()
+        for c in self._response.iter_content(10 * 1024):
+            dest.write(c)
+            self._digest.update(c)
+        self._check_digest()
+
+    def contents(self):
+        content = self._response.content
+        self._digest.update(content)
+        self._check_digest()
+        return content
+
+class ChecksumError(IOError):
+
+    def __init__(self, msg):
+        super(ChecksumError, self).__init__(None, msg)
+
+class NoOpDigest():
+
+    def __init__(self):
+        self.digest_size = -1
+        self.block_size = -1
+
+    def update(self, content):
+        pass
+
+    def hexdigest(self):
+        return None
+
+    def digest(self):
+        return None
+
+    def copy(self):
+        return self
 
 class RemoteError(IOError):
 
@@ -78,14 +136,17 @@ def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
             durations = exponential_backoff(max_tries)
             for i in durations:
                 if i > 0:
-                    log.debug("Sleeping for %f seconds before retrying", min(i, 20))
-                    time.sleep(min(i, 20))
+                    log.debug("Sleeping for %f seconds before retrying", i)
+                    time.sleep(i)
 
                 try:
                     return f(*args, **kwargs)
                 except SSLError, e:
                     log.exception("SSLError")
                     raise RemoteError(None, str(e), retry_mode='TERMINAL')
+                except ChecksumError, e:
+                    log.exception("Checksum mismatch")
+                    last_error = RemoteError(None, str(e))
                 except ConnectionError, e:
                     log.exception('ConnectionError')
                     last_error = RemoteError(None, str(e))
@@ -123,13 +184,13 @@ def get_cert():
 # Instance metadata
 #==============================================================================
 
-@retry_on_failure(max_tries=3)
+@retry_on_failure(max_tries=10)
 def get_instance_identity_document():
     resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document')
     resp.raise_for_status()
     return resp.text.rstrip()
 
-@retry_on_failure(max_tries=3)
+@retry_on_failure(max_tries=10)
 def get_instance_identity_signature():
     resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature')
     resp.raise_for_status()
@@ -137,7 +198,7 @@ def get_instance_identity_signature():
 
 _instance_id = '__unset'
 
-@retry_on_failure(max_tries=3)
+@retry_on_failure(max_tries=10)
 def _fetch_instance_id():
     resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2)
     resp.raise_for_status()
@@ -160,7 +221,7 @@ def get_instance_id():
 def is_ec2():
     return get_instance_id() is not None
 
-@retry_on_failure(max_tries=3)
+@retry_on_failure(max_tries=10)
 def get_role_creds(name):
     resp = requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name)
     resp.raise_for_status()
@@ -209,6 +270,9 @@ def json_from_response(resp):
             return resp.json()
         return resp.json
     return json.load(StringIO.StringIO(resp.content))
+
+def is_s3_url(url):
+    return re.match(r'https?://([-\w.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com.*', url, re.IGNORECASE) is not None
 
 #==============================================================================
 # Command-line (credentials, options, etc)
