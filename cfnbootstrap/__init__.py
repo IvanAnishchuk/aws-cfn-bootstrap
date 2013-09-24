@@ -55,12 +55,12 @@ propagate=0
 class=handlers.RotatingFileHandler
 level=%(conf_level)s
 formatter=amzn
-args=('%(conf_file)s', 'a', 5242880, 5)
+args=('%(conf_file)s', 'a', 5242880, 5, 'UTF-8')
 [handler_wire]
 class=handlers.RotatingFileHandler
 level=DEBUG
 formatter=amzn
-args=('%(wire_file)s', 'a', 5242880, 5)
+args=('%(wire_file)s', 'a', 5242880, 5, 'UTF-8')
 [handler_null]
 class=cfnbootstrap.NullHandler
 args=()

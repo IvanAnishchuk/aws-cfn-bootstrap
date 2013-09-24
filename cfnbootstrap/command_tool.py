@@ -55,65 +55,65 @@ class CommandTool(object):
             return commands_run
 
         for name in sorted(action.keys()):
-            log.debug("Running command %s", name)
+            log.debug(u"Running command %s", name)
 
             attributes = action[name]
 
             if "defaults" in attributes:
-                log.debug("Generating defaults for command %s", name)
+                log.debug(u"Generating defaults for command %s", name)
                 defaultsResult = ProcessHelper(attributes['defaults'], stderr=subprocess.PIPE).call()
-                log.debug("Defaults script for %s output: %s", name, defaultsResult.stdout)
+                log.debug(u"Defaults script for %s output: %s", name, defaultsResult.stdout.decode('utf-8'))
                 if defaultsResult.returncode:
-                    log.error("Defaults script failed for %s: %s", name, defaultsResult.stderr)
-                    raise ToolError("Defaults script for command %s failed" % name)
+                    log.error(u"Defaults script failed for %s: %s", name, defaultsResult.stderr.decode('utf-8'))
+                    raise ToolError(u"Defaults script for command %s failed" % name)
 
                 old_attrs = attributes
                 attributes = json.loads(defaultsResult.stdout)
                 attributes.update(old_attrs)
 
             if not "command" in attributes:
-                log.error("No command specified for %s", name)
-                raise ToolError("%s does not specify the 'command' attribute, which is required" % name)
+                log.error(u"No command specified for %s", name)
+                raise ToolError(u"%s does not specify the 'command' attribute, which is required" % name)
 
             cwd = os.path.expanduser(attributes["cwd"]) if "cwd" in attributes else None
             env = attributes.get("env", None)
 
             if "test" in attributes:
-                log.debug("Running test for command %s", name)
+                log.debug(u"Running test for command %s", name)
                 test = attributes["test"]
                 testResult = ProcessHelper(test, env=env, cwd=cwd).call()
-                log.debug("Test command output: %s", testResult.stdout)
+                log.debug(u"Test command output: %s", testResult.stdout.decode('utf-8'))
                 if testResult.returncode:
-                    log.info("Test failed with code %s", testResult.returncode)
+                    log.info(u"Test failed with code %s", testResult.returncode)
                     continue
                 else:
-                    log.debug("Test for command %s passed", name)
+                    log.debug(u"Test for command %s passed", name)
             else:
-                log.debug("No test for command %s", name)
+                log.debug(u"No test for command %s", name)
 
             cmd_to_run = attributes["command"]
             if "runas" in attributes:
                 if os.name == 'nt':
-                    raise ToolError('Command %s specified "runas", which is not supported on Windows' % name)
+                    raise ToolError(u'Command %s specified "runas", which is not supported on Windows' % name)
 
                 if isinstance(cmd_to_run, basestring):
-                    cmd_to_run = 'su %s -c %s' % (attributes['runas'], cmd_to_run)
+                    cmd_to_run = u'su %s -c %s' % (attributes['runas'], cmd_to_run)
                 else:
                     cmd_to_run = ['su', attributes['runas'], '-c'] + cmd_to_run
 
             commandResult = ProcessHelper(cmd_to_run, env=env, cwd=cwd).call()
 
             if commandResult.returncode:
-                log.error("Command %s (%s) failed", name, attributes["command"])
-                log.debug("Command %s output: %s", name, commandResult.stdout)
+                log.error(u"Command %s (%s) failed", name, attributes["command"])
+                log.debug(u"Command %s output: %s", name, commandResult.stdout.decode('utf-8'))
                 if interpret_boolean(attributes.get("ignoreErrors")):
                     log.info("ignoreErrors set to true, continuing build")
                     commands_run.append(name)
                 else:
-                    raise ToolError("Command %s failed" % name)
+                    raise ToolError(u"Command %s failed" % name)
             else:
-                log.info("Command %s succeeded", name)
-                log.debug("Command %s output: %s", name, commandResult.stdout)
+                log.info(u"Command %s succeeded", name)
+                log.debug(u"Command %s output: %s", name, commandResult.stdout.decode('utf-8'))
                 commands_run.append(name)
 
         return commands_run

@@ -440,7 +440,7 @@ class Credentials(object):
 def log_request(req):
     wire_log.debug('Request: %s %s [headers: %s]', req.method, req.full_url, req.headers)
 
-def log_response(resp):
+def log_response(resp, *args, **kwargs):
     wire_log.debug('Response: %s %s [headers: %s]', resp.status_code, resp.url, resp.headers)
     if not resp.ok:
         wire_log.debug('Response error: %s', resp.content)
@@ -448,13 +448,22 @@ def log_response(resp):
 # Requests compat
 #==============================================================================
 
-_IS_NEW_REQUESTS = tuple(int(v) for v in requests.__version__.split('.')) >= (1, 0, 0)
+_IS_1_DOT_0_REQUESTS = tuple(int(v) for v in requests.__version__.split('.')) >= (1, 0, 0)
+_IS_1_DOT_2_REQUESTS = tuple(int(v) for v in requests.__version__.split('.')) >= (1, 2, 0)
+
+def get_hooks():
+    hooks = { 'response' : log_response }
+    if not _IS_1_DOT_2_REQUESTS:
+        hooks['pre_request'] = log_request
+    return hooks
+
 
 def req_opts(kwargs):
     kwargs = dict(kwargs) if kwargs else {}
     kwargs['verify'] = get_cert()
-    kwargs['hooks'] = dict(pre_request=log_request, response=log_response)
-    if _IS_NEW_REQUESTS:
+    kwargs['hooks'] = get_hooks()
+
+    if _IS_1_DOT_0_REQUESTS:
         kwargs['stream'] = True
     else:
         kwargs['prefetch'] = False

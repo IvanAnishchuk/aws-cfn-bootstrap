@@ -38,7 +38,7 @@ log = logging.getLogger('cfn.client')
 
 class Signer(object):
 
-    def sign(self, verb, base_url, params, creds, in_headers={}, timestamp=None):
+    def sign(self, verb, base_url, params, creds, in_headers=None, timestamp=None):
         pass
 
     def _construct_query(self, sign_data):
@@ -59,7 +59,7 @@ class Signer(object):
 
 class CFNSigner(Signer):
 
-    def sign(self, verb, base_url, params, creds, in_headers={}, timestamp=None):
+    def sign(self, verb, base_url, params, creds, in_headers=None, timestamp=None):
         base_url = self._normalize_url(base_url)
 
         if not util.is_ec2():
@@ -68,21 +68,21 @@ class CFNSigner(Signer):
         document = util.get_instance_identity_document()
         signature = util.get_instance_identity_signature()
 
-        new_headers = dict(in_headers)
+        new_headers = dict({} if in_headers is None else in_headers)
         new_headers['Authorization'] = 'CFN_V1 %s:%s' % (base64.b64encode(document), signature.replace('\n', ''))
 
         return (verb, base_url, params, new_headers)
 
 class V2Signer(Signer):
 
-    def sign(self, verb, base_url, in_params, creds, in_headers={}, timestamp=None):
+    def sign(self, verb, base_url, in_params, creds, in_headers=None, timestamp=None):
         base_url = self._normalize_url(base_url)
 
         if not timestamp:
             timestamp = datetime.datetime.utcnow()
 
         if not in_params:
-            'Signature V2 requires at least 1 Query String parameter (Action)'
+            raise ValueError('Signature V2 requires at least 1 Query String parameter (Action)')
 
         params = dict(in_params)
         params['SignatureVersion'] = '2'
@@ -94,7 +94,7 @@ class V2Signer(Signer):
 
         split_url = urlparse.urlsplit(base_url)
 
-        new_headers = dict(in_headers)
+        new_headers = dict({} if in_headers is None else in_headers)
         new_headers['Host'] = split_url.netloc
         if verb == 'POST':
             new_headers['Content-type'] = 'application/x-www-form-urlencoded'
