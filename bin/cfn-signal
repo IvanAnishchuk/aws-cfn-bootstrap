@@ -15,11 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import cfnbootstrap
 from cfnbootstrap import util
 from optparse import OptionParser
 import base64
 import re
-import requests
+from cfnbootstrap.packages import requests
 import socket
 import sys
 try:
@@ -72,12 +73,15 @@ if not re.match(r'https?://.*', url):
     print >> sys.stderr, "Error: Invalid WaitConditionHandle URL specified: %s" % args[0]
     sys.exit(1)
 
+cfnbootstrap.configureLogging("DEBUG")
+
 @util.retry_on_failure()
+@util.timeout()
 def send(url, data):
     requests.put(url,
                  data=json.dumps(data),
                  headers={"Content-Type" : ""},
-                 verify=util.get_cert(),
+                 verify=True,
                  proxies=util.get_proxyinfo(options)).raise_for_status()
 
 try:

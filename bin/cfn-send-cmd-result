@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import cfnbootstrap
 from cfnbootstrap.sqs_client import SQSClient
 from optparse import OptionParser
 import os
@@ -87,6 +88,8 @@ result_msg = {
               'Message' : ' '.join(args) if not success else '',
               'Status' : 'SUCCESS' if success else 'FAILURE',
               }
+
+cfnbootstrap.configureLogging("DEBUG")
 
 client = SQSClient(util.Credentials(options.access_key, options.secret_key, options.security_token), proxyinfo=util.get_proxyinfo(options))
 try:

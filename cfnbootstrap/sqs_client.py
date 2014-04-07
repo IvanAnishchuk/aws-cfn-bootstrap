@@ -22,7 +22,7 @@ Message  - a message from an SQS queue
 
 """
 from cfnbootstrap import aws_client
-from cfnbootstrap.util import retry_on_failure
+from cfnbootstrap.util import retry_on_failure, timeout
 from xml.etree import ElementTree
 import StringIO
 import logging
@@ -70,6 +70,7 @@ class SQSClient(aws_client.Client):
         return 'https://%s.queue.amazonaws.com' % region
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
+    @timeout(60)
     def receive_message(self, queue_url, attributes=None, max_messages=1, visibility_timeout=None,
                               request_credentials=None, wait_time=None):
         """
@@ -93,7 +94,8 @@ class SQSClient(aws_client.Client):
                                       timeout=wait_time + 3 if wait_time else None).content
         return Message._parse_list(StringIO.StringIO(response_content), self._xmlns)
 
-    @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
+    @retry_on_failure(max_tries=25, http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
+    @timeout()
     def send_message(self, queue_url, message_body, delay_seconds=None, request_credentials=None):
         """
         Calls SendMessage and returns a tuple of (MessageId, MD5OfMessageBody)
@@ -115,6 +117,7 @@ class SQSClient(aws_client.Client):
         return (message_id, md5_of_body)
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
+    @timeout()
     def delete_message(self, queue_url, receipt_handle, request_credentials=None):
         """
         Calls DeleteMessage on a specified receipt handle

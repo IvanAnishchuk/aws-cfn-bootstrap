@@ -21,7 +21,7 @@ AWSClient - an HTTP client that makes signed requests
 
 """
 from cfnbootstrap import util
-from requests import api
+from cfnbootstrap.packages.requests import api
 from xml.etree import ElementTree
 import StringIO
 import base64
@@ -220,7 +220,7 @@ class Client(object):
     @staticmethod
     def _extract_json_message(resp):
         try:
-            eDoc = util.json_from_response(resp)['Error']
+            eDoc = resp.json()['Error']
             code = eDoc['Code']
             message = eDoc['Message']
             error_type = eDoc['Type']

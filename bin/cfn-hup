@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import signal
 import cfnbootstrap
 from cfnbootstrap import update_hooks, util
 from optparse import OptionParser
@@ -44,6 +45,8 @@ parser.add_option("-v", "--verbose", help="Enables verbose logging",
 
 (options, args) = parser.parse_args()
 
+fatal_event = threading.Event()
+
 def main():
     cfnbootstrap.configureLogging("DEBUG", filename='cfn-hup.log')
 
@@ -72,8 +75,6 @@ def main():
             cmd_processor.register()
             cmd_processor.process()
     else:
-        fatal_event = threading.Event()
-
         interval = 15
         if main_config.has_option('main', 'interval'):
             interval = main_config.getint('main', 'interval')
@@ -81,7 +82,12 @@ def main():
                 logging.error("Invalid interval (must be 1 minute or greater): %s", interval)
                 sys.exit(1)
 
+        timers = [None, None]
+        timer_lock = threading.Lock()
         def do_process(last_log=datetime.datetime.utcnow()):
+            if fatal_event.isSet():
+                return
+
             if datetime.datetime.utcnow() - last_log > datetime.timedelta(minutes=5):
                 last_log = datetime.datetime.utcnow()
                 logging.info("cfn-hup processing is alive.")
@@ -93,9 +99,19 @@ def main():
                 fatal_event.set()
             except Exception, e:
                 logging.exception("Unhandled exception")
-            threading.Timer(interval * 60, do_process, (), {'last_log' : last_log}).start()
+
+            with timer_lock:
+                if fatal_event.isSet():
+                    timers[0] = None
+                    return
+                last_timer = threading.Timer(interval * 60, do_process, (), {'last_log' : last_log})
+                last_timer.start()
+                timers[0] = last_timer
 
         def do_cmd_process(last_log=datetime.datetime.utcnow()):
+            if fatal_event.isSet():
+                return
+
             if datetime.datetime.utcnow() - last_log > datetime.timedelta(minutes=5):
                 last_log = datetime.datetime.utcnow()
                 logging.info("command processing is alive.")
@@ -115,21 +131,34 @@ def main():
             except Exception, e:
                 logging.exception("Unhandled exception")
 
-            if delay > 0:
-                threading.Timer(delay, do_cmd_process, (), {'last_log' : last_log}).start()
-            else:
-                threading.Thread(target=do_cmd_process, args=(), kwargs={'last_log' : last_log}).start()
+            with timer_lock:
+                if fatal_event.isSet():
+                    timers[1] = None
+                    return
+                if delay > 0:
+                    last_cmd_timer = threading.Timer(delay, do_cmd_process, (), {'last_log' : last_log})
+                    last_cmd_timer.start()
+                    timers[1] = last_cmd_timer
+                else:
+                    threading.Thread(target=do_cmd_process, args=(), kwargs={'last_log' : last_log}).start()
+                    timers[1] = None
 
         if processor:
             do_process()
         if cmd_processor:
             do_cmd_process()
 
-        while True:
-            # do this instead of wait() without timeout
-            # as for some reason interrupts will not happen unless you wait for a specified time
-            # (even if the wait is for a long time, the interrupt comes immediately)
-            fatal_event.wait(60)
+        while not fatal_event.isSet():
+            fatal_event.wait(1)  # Allow signals
+
+        with timer_lock:
+            if timers[0] is not None:
+                timers[0].cancel()
+
+            if timers[1] is not None:
+                timers[1].cancel()
+
+        sys.exit(0)
 
 if options.no_daemon:
     main()
@@ -148,7 +177,12 @@ else:
     except ImportError:
         from daemon import pidfile as pidlockfile
 
-    with daemon.DaemonContext(pidfile=pidlockfile.TimeoutPIDLockFile('/var/run/cfn-hup.pid', 300)):
+    def kill(signal_num, stack_frame):
+        logging.info("Shutting down cfn-hup")
+        fatal_event.set()
+
+    with daemon.DaemonContext(pidfile=pidlockfile.TimeoutPIDLockFile('/var/run/cfn-hup.pid', 300),
+                              signal_map={signal.SIGTERM : kill}):
         try:
             main()
         except Exception, e:

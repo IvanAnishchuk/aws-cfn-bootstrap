@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import threading
 from cfnbootstrap import util
 from cfnbootstrap.cfn_client import CloudFormationClient
 from cfnbootstrap.sqs_client import SQSClient
@@ -20,7 +21,6 @@ from cfnbootstrap.util import ProcessHelper
 from threading import Timer
 import ConfigParser
 import calendar
-import collections
 import contextlib
 import datetime
 import logging
@@ -268,9 +268,37 @@ class CmdProcessor(object):
         else:
             raise ValueError("Could not retrieve instance id")
 
-        self._create_shelf_dir()
         self._creds_provider = AutoRefreshingCredentialsProvider(self.cfn_client, self.stack_name, self.listener_id)
         self.queue_url = None
+
+        self._create_storage_dir()
+        self._runfile = os.path.join(self.storage_dir, 'commands_run.json')
+
+        self._commands_run = self._load_commands_run()
+
+        if not 'by_id' in self._commands_run:
+            self._commands_run['by_id'] = {}
+
+        if not 'by_day' in self._commands_run:
+            self._commands_run['by_day'] = {}
+
+        self._currently_running = set()
+
+        self._currently_running_lock = threading.RLock()
+        self._commands_run_lock = threading.RLock()
+
+    def _load_commands_run(self):
+        if os.path.isfile(self._runfile):
+            with file(self._runfile, 'r') as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    log.exception("Could not load previously run commands")
+                    os.remove(self._runfile)
+                    return {}
+        else:
+            return {}
+
 
     def is_registered(self):
         return self.queue_url is not None and not self._creds_provider.listener_expired
@@ -282,67 +310,135 @@ class CmdProcessor(object):
         self.queue_url = self.cfn_client.register_listener(self.stack_name, self.listener_id).queue_url
         self._creds_provider.listener_expired = False
 
-    def _create_shelf_dir(self):
+    def _create_storage_dir(self):
         if os.name == 'nt':
-            self.shelf_dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-hup\data')
+            self.storage_dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-hup\data')
         else:
-            self.shelf_dir = '/var/lib/cfn-hup/data'
-        if not os.path.isdir(self.shelf_dir):
-            log.debug("Creating %s", self.shelf_dir)
+            self.storage_dir = '/var/lib/cfn-hup/data'
+        if not os.path.isdir(self.storage_dir):
+            log.debug("Creating %s", self.storage_dir)
             try:
-                os.makedirs(self.shelf_dir)
+                os.makedirs(self.storage_dir)
             except OSError:
-                log.warn("Could not create %s; using temporary directory", self.shelf_dir)
-                self.shelf_dir = tempfile.mkdtemp()
+                log.warn("Could not create %s; using temporary directory", self.storage_dir)
+                self.storage_dir = tempfile.mkdtemp()
+
+    def _command_completed(self, msg):
+        now = datetime.datetime.utcnow()
+        cmd_time = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        with self._commands_run_lock:
+            self._commands_run['by_id'][self._get_id(msg)] = True
+
+            if cmd_time not in self._commands_run['by_day']:
+                self._commands_run['by_day'][cmd_time] = []
+
+            self._commands_run['by_day'][cmd_time].append(self._get_id(msg))
+
+            try:
+                for key in self._commands_run['by_day'].iterkeys():
+                    if now - datetime.datetime.strptime(key, '%Y-%m-%dT%H:%M:%S') > datetime.timedelta(days=2):
+                        for cmd_id in self._commands_run['by_day'][key]:
+                            del self._commands_run['by_id'][cmd_id]
+
+                        del self._commands_run['by_day'][key]
+                self._write_commands_run()
+            except Exception:
+                log.exception('Could not write runfile to %s', self._runfile)
+
+    def _write_commands_run(self):
+        with file(self._runfile, 'w') as f:
+            json.dump(self._commands_run, f)
+
+
+    def _delete_message(self, receipt_handle):
+        try:
+            self.sqs_client.delete_message(self.queue_url, receipt_handle, request_credentials = self._creds_provider.credentials)
+        except Exception:
+            log.exception("Could not delete message for handle %s", receipt_handle)
+
+    def _get_id(self, msg):
+        return msg['DispatcherId'] + '|' + msg['CommandName'] + '|' + msg['InvocationId']
+
+    def _already_run(self, msg):
+        with self._commands_run_lock:
+            return self._get_id(msg) in self._commands_run['by_id']
+
+    def _parse(self, msg):
+        try:
+            return json.loads(json.loads(msg.body)['Message'])
+        except Exception:
+            log.exception("Received invalid message")
+            return None
 
     def process(self):
         if self.queue_url is None:
             raise FatalUpdateError("Cannot process command hooks before registering")
 
-        with contextlib.closing(shelve.open(os.path.join(self.shelf_dir, 'command_db'))) as shelf:
-            try:
-                for msg in self.sqs_client.receive_message(self.queue_url, request_credentials = self._creds_provider.credentials, wait_time=20):
-                    if self._process_msg(msg, shelf):
-                        self.sqs_client.delete_message(self.queue_url, msg.receipt_handle, request_credentials = self._creds_provider.credentials)
-            except FatalUpdateError:
-                raise
-            except IOError, e:
-                if hasattr(e, 'error_code') and 'AWS.SimpleQueueService.NonExistentQueue' == e.error_code:
-                    self.queue_url = None
-                log.exception("IOError caught while processing messages")
-            except Exception:
-                log.exception("Exception caught while processing messages")
-
-    def _process_msg(self, msg, shelf):
-        log.debug("Processing message: %s", msg)
+        threads  = []
 
         try:
-            cmd_msg = json.loads(json.loads(msg.body)['Message'])
+            for msg in self.sqs_client.receive_message(self.queue_url, request_credentials = self._creds_provider.credentials, wait_time=20):
+                cmd_msg = self._parse(msg)
+                if not cmd_msg:
+                    log.info("Invalid message, deleting: %s", msg)
+                    self._delete_message(msg.receipt_handle)
+                    continue
+
+                if self._already_run(cmd_msg):
+                    log.info("Already ran %s, deleting", self._get_id(cmd_msg))
+                    self._delete_message(msg.receipt_handle)
+                    continue
+
+                with self._currently_running_lock:
+                    if self._get_id(cmd_msg) not in self._currently_running and not self._already_run(cmd_msg):
+                        self._currently_running.add(self._get_id(cmd_msg))
+                        thread = threading.Thread(target=self._process_msg, args=(cmd_msg, msg.receipt_handle))
+                        thread.daemon = True
+                        threads.append(thread)
+                        thread.start()
+
+        except FatalUpdateError:
+            raise
+        except IOError, e:
+            if hasattr(e, 'error_code') and 'AWS.SimpleQueueService.NonExistentQueue' == e.error_code:
+                self.queue_url = None
+            log.exception("IOError caught while processing messages")
+        except Exception:
+            log.exception("Exception caught while processing messages")
+
+        return threads
+
+    def _process_msg(self, cmd_msg, receipt_handle):
+        log.debug("Processing message: %s", cmd_msg)
+        delete = False
+
+        try:
             log.debug("Command message: %s", cmd_msg)
 
             expiration = datetime.datetime.utcfromtimestamp(int(cmd_msg['Expiration']) / 1000)
-            cmds_run = shelf.get('commands_run', collections.defaultdict(set))
-            cmd_invocation = '%s|%s' % (cmd_msg['CommandName'], cmd_msg['InvocationId'])
 
             if expiration < datetime.datetime.utcnow():
                 log.info("Invocation %s of command %s for stack %s expired at %s; skipping",
                             cmd_msg['InvocationId'], cmd_msg['CommandName'], cmd_msg['DispatcherId'],
                             expiration.isoformat())
-            elif cmd_invocation in cmds_run[cmd_msg['DispatcherId']]:
-                log.info("Invocation %s of command %s for stack %s has already run; skipping",
-                            cmd_msg['InvocationId'], cmd_msg['CommandName'], cmd_msg['DispatcherId'])
+                delete = True
             else:
                 log.info("Received command %s (invocation id: %s)", cmd_msg['CommandName'], cmd_msg['InvocationId'])
                 hook_to_run = self.hooks.get(cmd_msg['CommandName'])
                 if not hook_to_run or self._run_hook(hook_to_run, cmd_msg):
-                    cmds_run[cmd_msg['DispatcherId']].add(cmd_invocation)
-                    shelf['commands_run'] = cmds_run
-                else:
-                    return False # transient failure, leave in queue
+                    self._command_completed(cmd_msg)
+                    delete = True
         except (ValueError, KeyError):
             log.exception("Invalid message received; deleting it")
-
-        return True
+            delete = True
+        except Exception:
+            log.exception("Unexpected exception running command")
+        finally:
+            if delete:
+                self._delete_message(receipt_handle)
+            with self._currently_running_lock:
+                self._currently_running.remove(self._get_id(cmd_msg))
 
     def _run_hook(self, hook, cmd_msg):
         if hook.singleton:
@@ -365,7 +461,10 @@ class CmdProcessor(object):
 
         action = hook.action
         if hook.runas:
-            action = ['su', hook.runas, '-c', action]
+            if os.name == 'posix':
+                action = ['su', hook.runas, '-c', action]
+            else:
+                log.warn('runas is not supported on this operating system')
 
         result = ProcessHelper(action, stderr=subprocess.PIPE, env=action_env).call()
 
@@ -419,6 +518,8 @@ class CmdProcessor(object):
         action_env['STACK_NAME'] = self.stack_name
         action_env['LISTENER_ID'] = self.listener_id
         action_env['RESULT_QUEUE'] = cmd_msg['ResultQueue']
+        if 'EventHandle' in cmd_msg:
+            action_env['EVENT_HANDLE'] = cmd_msg['EventHandle']
         creds = self._creds_provider.credentials
         action_env['RESULT_ACCESS_KEY'] = creds.access_key
         action_env['RESULT_SECRET_KEY'] = creds.secret_key

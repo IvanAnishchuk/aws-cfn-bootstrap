@@ -15,15 +15,15 @@
 #==============================================================================
 import hashlib
 from optparse import OptionGroup
-from requests.exceptions import ConnectionError, HTTPError, Timeout, \
-    SSLError
+import threading
+from cfnbootstrap.packages.requests.exceptions import ConnectionError, HTTPError, Timeout, SSLError
 import StringIO
 import imp
 import logging
 import os.path
 import random
 import re
-import requests
+from cfnbootstrap.packages import requests
 import stat
 import subprocess
 import sys
@@ -33,6 +33,13 @@ try:
     import simplejson as json
 except ImportError:
     import json
+
+try:
+    from cfnbootstrap.packages.requests.packages.urllib3.exceptions import ProxyError
+except ImportError:
+    class ProxyError(Exception):
+        def __init__(self, *args, **kwargs):
+            super(ProxyError, self).__init__(*args, **kwargs)
 
 log = logging.getLogger("cfn.init")
 wire_log = logging.getLogger("wire")
@@ -130,14 +137,20 @@ class RemoteError(IOError):
             raise ValueError("Invalid retry mode: %s" % retry_mode)
         self.retry_mode = retry_mode
 
+class Sleeper(object):
+
+    def sleep(self, secs):
+        time.sleep(secs)
+
 def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
     def _decorate(f):
         def _retry(*args, **kwargs):
+            sleeper = Sleeper()
             durations = exponential_backoff(max_tries)
             for i in durations:
                 if i > 0:
                     log.debug("Sleeping for %f seconds before retrying", i)
-                    time.sleep(i)
+                    sleeper.sleep(i)
 
                 try:
                     return f(*args, **kwargs)
@@ -150,6 +163,15 @@ def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
                 except ConnectionError, e:
                     log.exception('ConnectionError')
                     last_error = RemoteError(None, str(e))
+                except ProxyError, e:
+                    log.exception('ProxyError')
+                    last_error = RemoteError(None, str(e))
+                    # ProxyError skips the typical 3 retries done by urllib
+                    # this prevents us from taking an availability hit when there is a 'false' ProxyError
+                    # which happens because Requests never passes proxies==None to urllib3,
+                    # and newer versions of urllib3 always wrap socket errors in ProxyError when proxies is not None
+                    if len(durations) < max_tries * 3:
+                        extend_backoff(durations)
                 except HTTPError, e:
                     last_error = http_error_extractor(e.response)
                     if last_error.retry_mode == 'TERMINAL':
@@ -161,24 +183,55 @@ def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
                 except Timeout, e:
                     log.exception('Timeout')
                     last_error = RemoteError(None, str(e))
+                except TimeoutError, e:
+                    log.exception('Client-side timeout')
+                    last_error = RemoteError(None, str(e))
+                except IOError, e:
+                    log.exception('Generic IOError')
+                    last_error = RemoteError(None, str(e))
+                except Exception, e:
+                    log.exception('Unexpected Exception')
+                    raise RemoteError(None, str(e), 'TERMINAL')
             else:
                 raise last_error
         return _retry
     return _decorate
 
-#==============================================================================
-# Certificate loading
-#==============================================================================
+class TimeoutError(StandardError):
 
-def main_is_frozen():
-    return (hasattr(sys, "frozen") or # new py2exe
-            hasattr(sys, "importers") # old py2exe
-            or imp.is_frozen("__main__")) # tools/freeze
+    def __init__(self, msg):
+        super(StandardError, self).__init__()
+        self.msg = msg
 
-def get_cert():
-    if main_is_frozen():
-        return os.path.join(os.path.dirname(sys.executable), 'cacert.pem')
-    return True # True tells Requests to find its own cert
+
+def timeout(duration=60):
+    def _decorate(f):
+        def _timeout(*args, **kwargs):
+            ret_val = []
+            exc = []
+            def value_fn():
+                try:
+                    ret_val.append(f(*args, **kwargs))
+                except Exception, e:
+                    exc.append(e)
+
+            worker_thread = threading.Thread(target=value_fn)
+            worker_thread.daemon = True
+            worker_thread.start()
+            worker_thread.join(duration)
+
+            if worker_thread.isAlive():
+                log.warn('Timeout of %s seconds breached', duration)
+                raise TimeoutError("Execution did not succeed after %s seconds" % duration)
+
+            if exc:
+                raise exc[0]
+
+            return ret_val[0] if ret_val else None
+
+        return _timeout
+    return _decorate
+
 
 #==============================================================================
 # Instance metadata
@@ -225,7 +278,7 @@ def is_ec2():
 def get_role_creds(name):
     resp = requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name)
     resp.raise_for_status()
-    role = json_from_response(resp)
+    role = resp.json()
     return role['AccessKeyId'], role['SecretAccessKey'], role['Token']
 
 _trues = frozenset([True, 1, 'true', 'yes', 'y', '1'])
@@ -263,13 +316,6 @@ def extract_value(metadata, path):
         return_data = return_data[element]
 
     return return_data
-
-def json_from_response(resp):
-    if hasattr(resp, 'json'):
-        if callable(resp.json):
-            return resp.json()
-        return resp.json
-    return json.load(StringIO.StringIO(resp.content))
 
 def is_s3_url(url):
     return re.match(r'https?://([-\w.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com.*', url, re.IGNORECASE) is not None
@@ -436,37 +482,19 @@ class Credentials(object):
     def expiration(self):
         return self._expiration
 
-
-def log_request(req):
-    wire_log.debug('Request: %s %s [headers: %s]', req.method, req.full_url, req.headers)
-
 def log_response(resp, *args, **kwargs):
     wire_log.debug('Response: %s %s [headers: %s]', resp.status_code, resp.url, resp.headers)
     if not resp.ok:
         wire_log.debug('Response error: %s', resp.content)
-#==============================================================================
-# Requests compat
-#==============================================================================
-
-_IS_1_DOT_0_REQUESTS = tuple(int(v) for v in requests.__version__.split('.')) >= (1, 0, 0)
-_IS_1_DOT_2_REQUESTS = tuple(int(v) for v in requests.__version__.split('.')) >= (1, 2, 0)
 
 def get_hooks():
-    hooks = { 'response' : log_response }
-    if not _IS_1_DOT_2_REQUESTS:
-        hooks['pre_request'] = log_request
-    return hooks
-
+    return {'response': log_response}
 
 def req_opts(kwargs):
     kwargs = dict(kwargs) if kwargs else {}
-    kwargs['verify'] = get_cert()
+    kwargs['verify'] = True
     kwargs['hooks'] = get_hooks()
-
-    if _IS_1_DOT_0_REQUESTS:
-        kwargs['stream'] = True
-    else:
-        kwargs['prefetch'] = False
+    kwargs['stream'] = True
 
     return kwargs
 

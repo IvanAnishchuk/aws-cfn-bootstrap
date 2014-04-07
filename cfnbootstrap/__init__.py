@@ -111,5 +111,3 @@ def configureLogging(level='INFO', quiet=False, filename='cfn-init.log', log_dir
         if not quiet:
             print >> sys.stderr, "Could not open %s for logging.  Using stderr instead." % output_file
         logging.config.fileConfig(StringIO.StringIO(_config), config)
-
-configureLogging(quiet=True, wire_log=True)

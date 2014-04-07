@@ -23,7 +23,7 @@ StackResourceDetail  - detailed information about a StackResource
 """
 from cfnbootstrap import aws_client, util
 from cfnbootstrap.aws_client import CFNSigner, V4Signer
-from cfnbootstrap.util import retry_on_failure
+from cfnbootstrap.util import retry_on_failure, timeout
 import datetime
 import logging
 import re
@@ -83,6 +83,7 @@ class CloudFormationClient(aws_client.Client):
         return None
 
     @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    @timeout()
     def describe_stack_resource(self, logicalResourceId, stackName, request_credentials=None):
         """
         Calls DescribeStackResource and returns a StackResourceDetail object.
@@ -99,6 +100,7 @@ class CloudFormationClient(aws_client.Client):
                                                            request_credentials=request_credentials))
 
     @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    @timeout()
     def register_listener(self, stack_name, listener_id=None, request_credentials=None):
         """
         Calls RegisterListener and returns a Listener object
@@ -117,6 +119,7 @@ class CloudFormationClient(aws_client.Client):
         return Listener(self._call(params, request_credentials = request_credentials))
 
     @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    @timeout()
     def elect_command_leader(self, stack_name, command_name, invocation_id, listener_id=None, request_credentials=None):
         """
         Calls ElectCommandLeader and returns the listener id of the leader
@@ -135,11 +138,12 @@ class CloudFormationClient(aws_client.Client):
         if not self.using_instance_identity:
             params["ListenerId"] = listener_id
 
-        result_data = util.json_from_response(self._call(params, request_credentials = request_credentials))
+        result_data = self._call(params, request_credentials = request_credentials).json()
 
         return result_data['ElectCommandLeaderResponse']['ElectCommandLeaderResult']['ListenerId']
 
     @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    @timeout()
     def get_listener_credentials(self, stack_name, listener_id=None, request_credentials=None):
         """
         Calls GetListenerCredentials and returns a Credentials object
@@ -156,7 +160,7 @@ class CloudFormationClient(aws_client.Client):
             params["ListenerId"] = listener_id
 
         resp = self._call(params, request_credentials = request_credentials)
-        body = util.json_from_response(resp)['GetListenerCredentialsResponse']['GetListenerCredentialsResult']['Credentials']
+        body = resp.json()['GetListenerCredentialsResponse']['GetListenerCredentialsResult']['Credentials']
         return Credentials(body['AccessKeyId'],
             body['SecretAccessKey'],
             body['SessionToken'],
@@ -167,7 +171,7 @@ class Listener(object):
     """Result of RegisterListener"""
 
     def __init__(self, resp):
-        result = util.json_from_response(resp)['RegisterListenerResponse']['RegisterListenerResult']
+        result = resp.json()['RegisterListenerResponse']['RegisterListenerResult']
         self._queue_url = result['QueueUrl']
 
     @property
@@ -178,7 +182,7 @@ class StackResourceDetail(object):
     """Detailed information about a stack resource"""
 
     def __init__(self, resp):
-        detail = util.json_from_response(resp)['DescribeStackResourceResponse']['DescribeStackResourceResult']['StackResourceDetail']
+        detail = resp.json()['DescribeStackResourceResponse']['DescribeStackResourceResult']['StackResourceDetail']
 
         self._description = detail.get('Description')
         self._lastUpdated = datetime.datetime.utcfromtimestamp(detail['LastUpdatedTimestamp'])
