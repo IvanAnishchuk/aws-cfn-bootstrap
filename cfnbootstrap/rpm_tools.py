@@ -14,7 +14,7 @@
 # limitations under the License.
 #==============================================================================
 from cfnbootstrap.construction_errors import ToolError
-from cfnbootstrap.util import ProcessHelper
+from cfnbootstrap.util import ProcessHelper, LoggingProcessHelper
 import logging
 import re
 import subprocess
@@ -96,7 +96,7 @@ class YumTool(object):
         if pkg_specs_to_upgrade:
             log.debug("Installing/updating %s via yum", pkg_specs_to_upgrade)
 
-            result = ProcessHelper(['yum', '-y', 'install'] + pkg_specs_to_upgrade).call()
+            result = LoggingProcessHelper(['yum', '-y', 'install'] + pkg_specs_to_upgrade).call()
 
             if result.returncode:
                 log.error("Yum failed. Output: %s", result.stdout)
@@ -105,7 +105,7 @@ class YumTool(object):
         if pkg_specs_to_downgrade:
             log.debug("Downgrading %s via yum", pkg_specs_to_downgrade)
 
-            result = ProcessHelper(['yum', '-y', 'downgrade'] + pkg_specs_to_downgrade).call()
+            result = LoggingProcessHelper(['yum', '-y', 'downgrade'] + pkg_specs_to_downgrade).call()
 
             if result.returncode:
                 log.error("Yum failed. Output: %s", result.stdout)

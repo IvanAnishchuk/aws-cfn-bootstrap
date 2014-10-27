@@ -14,7 +14,7 @@
 # limitations under the License.
 #==============================================================================
 from cfnbootstrap.construction_errors import ToolError
-from cfnbootstrap.util import ProcessHelper, interpret_boolean
+from cfnbootstrap.util import ProcessHelper, LoggingProcessHelper, interpret_boolean
 import logging
 import os.path
 import subprocess
@@ -101,7 +101,7 @@ class CommandTool(object):
                 else:
                     cmd_to_run = ['su', attributes['runas'], '-c'] + cmd_to_run
 
-            commandResult = ProcessHelper(cmd_to_run, env=env, cwd=cwd).call()
+            commandResult = LoggingProcessHelper(cmd_to_run, env=env, cwd=cwd).call()
 
             if commandResult.returncode:
                 log.error(u"Command %s (%s) failed", name, attributes["command"])

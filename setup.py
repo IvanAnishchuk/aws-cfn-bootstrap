@@ -36,7 +36,8 @@ _opts = {
         }
 _data_files = [('share/doc/%s-%s' % (name, version), ['license/NOTICE.txt', 'license/LICENSE.txt']),
                ('init/redhat', ['init/redhat/cfn-hup']),
-               ('init/ubuntu', ['init/ubuntu/cfn-hup'])]
+               ('init/ubuntu', ['init/ubuntu/cfn-hup']),
+               ('', ['CHANGELOG.txt'])]
 try:
     import py2exe
     class WindowsDistribution(Distribution):
@@ -58,7 +59,7 @@ try:
                         'dll_excludes' : ['msvcr71.dll', 'w9xpopen.exe', ''],
                         'compressed' : True,
                       }
-    _data_files = [('', ['license/win/NOTICE.txt', 'license/win/LICENSE.rtf', 'cfnbootstrap/packages/requests/cacert.pem'])]
+    _data_files = [('', ['license/win/NOTICE.txt', 'license/win/LICENSE.rtf', 'cfnbootstrap/packages/requests/cacert.pem', 'CHANGELOG.txt'])]
 except ImportError:
     pass
 

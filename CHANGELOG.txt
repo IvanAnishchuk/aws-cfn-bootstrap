@@ -1,0 +1,6 @@
+* Fri Oct 17 2014 - adamthom (at) amazon.com
+- Use V4 signatures for SQS
+- Use V4 signatures for S3 when the region is specified
+
+* Fri Oct 10 2014 - mhhinkle (at) amazon.com
+- Updated cfn-signal to optionally use the CloudFormation SignalResource API

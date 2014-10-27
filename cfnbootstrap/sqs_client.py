@@ -22,6 +22,7 @@ Message  - a message from an SQS queue
 
 """
 from cfnbootstrap import aws_client
+from cfnbootstrap.aws_client import V4Signer
 from cfnbootstrap.util import retry_on_failure, timeout
 from xml.etree import ElementTree
 import StringIO
@@ -38,18 +39,33 @@ class SQSClient(aws_client.Client):
     - Public methods of this class have a 1-to-1 equivalence to published SQS APIs.
     - Calls are retried internally when appropriate; callers should not retry.
 
+    Attributes:
+    _apiVersion - the SQS API version
+    _xmlns      - the XML namespace for the SQS API version in use
+    _endpoints  - SQS service endpoints differing from the https://<region>.queue.amazonaws.com format
+
     """
 
     _apiVersion = "2012-11-05"
     _xmlns='http://queue.amazonaws.com/doc/%s/' % _apiVersion
+    _endpoints = { 'us-east-1': 'https://queue.amazonaws.com',
+                   'cn-north-1': 'https://cn-north-1.queue.amazonaws.com.cn' }
 
-    def __init__(self, credentials, url=None, proxyinfo=None):
+    def __init__(self, credentials, url=None, region='us-east-1', proxyinfo=None):
         if not url:
-            endpoint = SQSClient.endpointForRegion('us-east-1')
+            endpoint = SQSClient.endpointForRegion(region)
         else:
             endpoint = self._fix_endpoint(url)
 
-        super(SQSClient, self).__init__(credentials, False, endpoint, xmlns='http://queue.amazonaws.com/doc/%s/' % SQSClient._apiVersion, proxyinfo=proxyinfo)
+        if not region:
+            region = SQSClient.regionForEndpoint(endpoint)
+
+        if not region:
+            raise ValueError('Region is required for AWS V4 Signatures')
+
+        signer = V4Signer(region, 'sqs')
+
+        super(SQSClient, self).__init__(credentials, False, endpoint, signer=signer, xmlns='http://queue.amazonaws.com/doc/%s/' % SQSClient._apiVersion, proxyinfo=proxyinfo)
         log.debug("SQS client initialized with endpoint %s", endpoint)
 
     # SQS SSL certificates have CNs based on queue.amazonaws.com
@@ -65,9 +81,20 @@ class SQSClient(aws_client.Client):
 
     @classmethod
     def endpointForRegion(cls, region):
-        if region == 'us-east-1':
-            return 'https://queue.amazonaws.com'
+        if region in SQSClient._endpoints:
+            return SQSClient._endpoints[region]
         return 'https://%s.queue.amazonaws.com' % region
+
+    @classmethod
+    def regionForEndpoint(cls, endpoint):
+        match = re.match(r'https://([\w\d-]+).queue.amazonaws.com', endpoint)
+        if match:
+            return match.group(1)
+        inverse_endpoints = dict((v,k) for k, v in SQSClient._endpoints.iteritems())
+        if endpoint in inverse_endpoints:
+            return inverse_endpoints[endpoint]
+        log.warn("Non-standard SQS endpoint: %s", endpoint)
+        return None
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))
     @timeout(60)

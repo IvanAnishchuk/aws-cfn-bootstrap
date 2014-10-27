@@ -41,19 +41,6 @@ class Signer(object):
     def sign(self, verb, base_url, params, creds, in_headers=None, timestamp=None):
         pass
 
-    def _construct_query(self, sign_data):
-        ret_str = ''
-        for k, vs in sorted(sign_data.iteritems(), key=operator.itemgetter(0)):
-            if isinstance(vs, list):
-                for v in sorted(vs):
-                    ret_str += '&'.join(urllib.quote(k, safe='~') + '=' + urllib.quote(v, safe='~'))
-            else:
-                if ret_str:
-                    ret_str += '&'
-                ret_str += urllib.quote(k, safe='~') + '=' + urllib.quote(vs, safe='~')
-
-        return ret_str
-
     def _normalize_url(self, base_url):
         return base_url if base_url.endswith('/') else base_url + '/'
 
@@ -70,40 +57,6 @@ class CFNSigner(Signer):
 
         new_headers = dict({} if in_headers is None else in_headers)
         new_headers['Authorization'] = 'CFN_V1 %s:%s' % (base64.b64encode(document), signature.replace('\n', ''))
-
-        return (verb, base_url, params, new_headers)
-
-class V2Signer(Signer):
-
-    def sign(self, verb, base_url, in_params, creds, in_headers=None, timestamp=None):
-        base_url = self._normalize_url(base_url)
-
-        if not timestamp:
-            timestamp = datetime.datetime.utcnow()
-
-        if not in_params:
-            raise ValueError('Signature V2 requires at least 1 Query String parameter (Action)')
-
-        params = dict(in_params)
-        params['SignatureVersion'] = '2'
-        params['SignatureMethod'] = 'HmacSHA256'
-        params['AWSAccessKeyId'] = creds.access_key
-        params['Timestamp'] = timestamp.replace(microsecond=0).isoformat()
-        if creds.security_token:
-            params['SecurityToken'] = creds.security_token
-
-        split_url = urlparse.urlsplit(base_url)
-
-        new_headers = dict({} if in_headers is None else in_headers)
-        new_headers['Host'] = split_url.netloc
-        if verb == 'POST':
-            new_headers['Content-type'] = 'application/x-www-form-urlencoded'
-
-        stringToSign = verb + '\n' + split_url.netloc + '\n' + (split_url.path if split_url.path else '/') + '\n'
-
-        stringToSign += self._construct_query(params)
-
-        params['Signature'] = base64.b64encode(hmac.new(creds.secret_key.encode('utf-8'), stringToSign.encode('utf-8'), hashlib.sha256).digest())
 
         return (verb, base_url, params, new_headers)
 
@@ -143,7 +96,7 @@ class V4Signer(Signer):
 
         (canonical_headers, signed_headers) = self._canonicalize_headers(new_headers)
         canonical_request += canonical_headers + '\n' + signed_headers + '\n'
-        canonical_request += hashlib.sha256(self._construct_query(params).encode('utf-8') if verb == 'POST' else '').hexdigest()
+        canonical_request += hashlib.sha256(Client.construct_query(params).encode('utf-8') if verb == 'POST' else '').hexdigest()
 
         string_to_sign = 'AWS4-HMAC-SHA256\n' + timestamp_formatted + '\n' + scope + '\n' + hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
 
@@ -163,7 +116,7 @@ class V4Signer(Signer):
         split = urlparse.urlsplit(uri)
         if not split.path:
             return '/'
-        path = urlparse.urlsplit(urlparse.urljoin('http://foo.com', split.path.lstrip('/'))).path.rstrip('/')
+        path = urlparse.urlsplit(urlparse.urljoin('http://foo.com', split.path.lstrip('/'))).path
         return urllib.quote(path, '/~') if path else '/'
 
     def _canonicalize_query(self, params):
@@ -209,13 +162,30 @@ class Client(object):
     A base AWS/QUERY client
     '''
 
-    def __init__(self, credentials, is_json, endpoint=None, signer=V2Signer(), xmlns=None, proxyinfo=None):
+    def __init__(self, credentials, is_json, endpoint=None, signer=None, xmlns=None, proxyinfo=None):
         self._credentials = credentials
         self._endpoint = endpoint
         self._is_json = is_json
         self._xmlns = xmlns
+        if not signer:
+            raise ValueError('A valid signer is required')
         self._signer = signer
         self._proxyinfo = dict(proxyinfo) if proxyinfo else None
+
+
+    @staticmethod
+    def construct_query(sign_data):
+        ret_str = ''
+        for k, vs in sorted(sign_data.iteritems(), key=operator.itemgetter(0)):
+            if isinstance(vs, list):
+                for v in sorted(vs):
+                    ret_str += '&'.join(urllib.quote(k, safe='~') + '=' + urllib.quote(v, safe='~'))
+            else:
+                if ret_str:
+                    ret_str += '&'
+                ret_str += urllib.quote(k, safe='~') + '=' + urllib.quote(vs, safe='~')
+
+        return ret_str
 
     @staticmethod
     def _extract_json_message(resp):
@@ -257,7 +227,7 @@ class Client(object):
         headers['User-Agent'] = 'CloudFormation Tools'
         return util.check_status(api.request(verb, base_url,
                            **util.req_opts({
-                            'data' : params if verb=='POST' else dict(),
+                            'data' : Client.construct_query(params) if verb=='POST' else dict(),
                             'params' : params if verb!='POST' else dict(),
                             'headers' : headers,
                             'proxies' : self._proxyinfo,

@@ -53,7 +53,9 @@ def parse_config(config_path):
 
     stack = main_config.get('main', 'stack')
 
-    if main_config.has_option('main', 'credential-file'):
+    if main_config.has_option('main', 'role'):
+        credentials = util.RoleBasedCredentials(main_config.get('main', 'role'))
+    elif main_config.has_option('main', 'credential-file'):
         try:
             credentials = util.extract_credentials(main_config.get('main', 'credential-file'))
         except IOError, e:
@@ -124,6 +126,12 @@ def parse_config(config_path):
 
     cfn_client = CloudFormationClient(credentials, cfn_url, region)
 
+    if main_config.has_option('main', 'multi-threaded'):
+        value = main_config.get('main', 'multi-threaded')
+        multi_threaded = util.interpret_boolean(value)
+    else:
+        multi_threaded = True
+
     if hooks:
         processor = HookProcessor(hooks, stack, cfn_client)
     else:
@@ -134,10 +142,11 @@ def parse_config(config_path):
         if main_config.has_option('main', 'sqs_url'):
             sqs_url = main_config.get('main', 'sqs_url')
 
-        sqs_client = SQSClient(credentials, sqs_url)
+        sqs_client = SQSClient(credentials, sqs_url, region=region)
 
         cmd_processor = CmdProcessor(stack, cmd_hooks, sqs_client,
-                                     CloudFormationClient(credentials, cfn_url, region))
+                                     CloudFormationClient(credentials, cfn_url, region),
+                                     multi_threaded)
     else:
         cmd_processor = None
 
@@ -202,40 +211,42 @@ class AutoRefreshingCredentialsProvider(object):
         self._creds = None
         self._last_timer = None
         self.listener_expired = False
+        self._refresh_lock = threading.Lock()
 
     def refresh(self):
-        log.info("Refreshing listener credentials")
-        if self._last_timer:
-            self._last_timer.cancel()
+        with self._refresh_lock:
+            log.info("Refreshing listener credentials")
+            if self._last_timer:
+                self._last_timer.cancel()
 
-        try:
-            self._creds = self._cfn_client.get_listener_credentials(self._stack_name, self._listener_id)
-            self.listener_expired = False
-        except IOError, e:
-            if hasattr(e, 'error_code') and 'ListenerExpired' == e.error_code:
-                self.listener_expired = True
-                log.exception("Listener expired")
-            else:
+            try:
+                self._creds = self._cfn_client.get_listener_credentials(self._stack_name, self._listener_id)
                 self.listener_expired = False
-                log.exception("IOError caught while refreshing credentials")
-        except Exception:
-            self.listener_expired = False
-            log.exception("Exception refreshing credentials")
+            except IOError, e:
+                if hasattr(e, 'error_code') and 'ListenerExpired' == e.error_code:
+                    self.listener_expired = True
+                    log.exception("Listener expired")
+                else:
+                    self.listener_expired = False
+                    log.exception("IOError caught while refreshing credentials")
+            except Exception:
+                self.listener_expired = False
+                log.exception("Exception refreshing credentials")
 
-        now = time.time()
-        expiration = calendar.timegm(self._creds.expiration.utctimetuple()) if self._creds else now
-        remaining = expiration - now
+            now = time.time()
+            expiration = calendar.timegm(self._creds.expiration.utctimetuple()) if self._creds else now
+            remaining = expiration - now
 
-        if remaining > 30 * 60:
-            next_refresh = min(2 * 60 * 60, remaining / 2)
-        else:
-            next_refresh = 60 * random.random()
+            if remaining > 30 * 60:
+                next_refresh = min(2 * 60 * 60, remaining / 2)
+            else:
+                next_refresh = 60 * random.random()
 
-        log.info("Scheduling next credential refresh in %s seconds", next_refresh)
-        t = Timer(next_refresh, self.refresh)
-        t.daemon = True
-        t.start()
-        self._last_timer = t
+            log.info("Scheduling next credential refresh in %s seconds", next_refresh)
+            t = Timer(next_refresh, self.refresh)
+            t.daemon = True
+            t.start()
+            self._last_timer = t
 
     def creds_expired(self):
         return self._creds and self._creds.expiration < datetime.datetime.utcnow()
@@ -255,12 +266,16 @@ class AutoRefreshingCredentialsProvider(object):
 class CmdProcessor(object):
     """Processes CommandService hooks"""
 
-    def __init__(self, stack_name, hooks, sqs_client, cfn_client):
+    def __init__(self, stack_name, hooks, sqs_client, cfn_client, multi_threaded):
         """Takes a list of Hook objects and processes them"""
         self.stack_name = stack_name
         self.hooks = self._hooks_by_path(hooks)
         self.sqs_client = sqs_client
         self.cfn_client = cfn_client
+        self.multi_threaded = multi_threaded
+        if not self.multi_threaded:
+            log.debug("Enabled single threading mode.");
+
         if util.is_ec2():
             self.listener_id = util.get_instance_id()
         elif not cfn_client.using_instance_identity:
@@ -336,12 +351,17 @@ class CmdProcessor(object):
             self._commands_run['by_day'][cmd_time].append(self._get_id(msg))
 
             try:
+                keys_to_delete = []
                 for key in self._commands_run['by_day'].iterkeys():
                     if now - datetime.datetime.strptime(key, '%Y-%m-%dT%H:%M:%S') > datetime.timedelta(days=2):
                         for cmd_id in self._commands_run['by_day'][key]:
                             del self._commands_run['by_id'][cmd_id]
 
-                        del self._commands_run['by_day'][key]
+                        keys_to_delete.append(key)
+
+                for key in keys_to_delete:
+                    del self._commands_run['by_day'][key]
+
                 self._write_commands_run()
             except Exception:
                 log.exception('Could not write runfile to %s', self._runfile)
@@ -393,10 +413,14 @@ class CmdProcessor(object):
                 with self._currently_running_lock:
                     if self._get_id(cmd_msg) not in self._currently_running and not self._already_run(cmd_msg):
                         self._currently_running.add(self._get_id(cmd_msg))
-                        thread = threading.Thread(target=self._process_msg, args=(cmd_msg, msg.receipt_handle))
-                        thread.daemon = True
-                        threads.append(thread)
-                        thread.start()
+
+                        if self.multi_threaded:
+                            thread = threading.Thread(target=self._process_msg, args=(cmd_msg, msg.receipt_handle))
+                            thread.daemon = True
+                            threads.append(thread)
+                            thread.start()
+                        else:
+                            self._process_msg(cmd_msg, msg.receipt_handle)
 
         except FatalUpdateError:
             raise
@@ -511,7 +535,8 @@ class CmdProcessor(object):
 
     def _get_environment(self, cmd_msg):
         action_env = dict(os.environ)
-        action_env['CMD_DATA'] = cmd_msg['Data']
+        if 'Data' in cmd_msg:
+            action_env['CMD_DATA'] = cmd_msg['Data']
         action_env['INVOCATION_ID'] = cmd_msg['InvocationId']
         action_env['DISPATCHER_ID'] = cmd_msg['DispatcherId']
         action_env['CMD_NAME'] = cmd_msg['CommandName']

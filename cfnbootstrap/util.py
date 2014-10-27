@@ -16,6 +16,7 @@
 import hashlib
 from optparse import OptionGroup
 import threading
+import datetime
 from cfnbootstrap.packages.requests.exceptions import ConnectionError, HTTPError, Timeout, SSLError
 import StringIO
 import imp
@@ -43,6 +44,7 @@ except ImportError:
 
 log = logging.getLogger("cfn.init")
 wire_log = logging.getLogger("wire")
+cmd_log = logging.getLogger("cfn.init.cmd")
 
 #==============================================================================
 # HTTP backoff-and-retry
@@ -239,13 +241,13 @@ def timeout(duration=60):
 
 @retry_on_failure(max_tries=10)
 def get_instance_identity_document():
-    resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document')
+    resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/document', proxies = {'no_proxy' : '169.254.169.254/32'})
     resp.raise_for_status()
     return resp.text.rstrip()
 
 @retry_on_failure(max_tries=10)
 def get_instance_identity_signature():
-    resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature')
+    resp = requests.get('http://169.254.169.254/latest/dynamic/instance-identity/signature', proxies = {'no_proxy' : '169.254.169.254/32'})
     resp.raise_for_status()
     return resp.text.rstrip()
 
@@ -253,7 +255,7 @@ _instance_id = '__unset'
 
 @retry_on_failure(max_tries=10)
 def _fetch_instance_id():
-    resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2)
+    resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2, proxies = {'no_proxy' : '169.254.169.254/32'})
     resp.raise_for_status()
     return resp.text.strip()
 
@@ -276,10 +278,10 @@ def is_ec2():
 
 @retry_on_failure(max_tries=10)
 def get_role_creds(name):
-    resp = requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name)
+    resp = requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/%s' % name, proxies = {'no_proxy' : '169.254.169.254/32'})
     resp.raise_for_status()
     role = resp.json()
-    return role['AccessKeyId'], role['SecretAccessKey'], role['Token']
+    return Credentials(role['AccessKeyId'], role['SecretAccessKey'], role['Token'], datetime.datetime.strptime(role['Expiration'], '%Y-%m-%dT%H:%M:%SZ'))
 
 _trues = frozenset([True, 1, 'true', 'yes', 'y', '1'])
 
@@ -318,7 +320,7 @@ def extract_value(metadata, path):
     return return_data
 
 def is_s3_url(url):
-    return re.match(r'https?://([-\w.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com.*', url, re.IGNORECASE) is not None
+    return re.match(r'https?://([-\w.]+?\.)?s3([-.][\w\d-]+)?.amazonaws.*', url, re.IGNORECASE) is not None
 
 #==============================================================================
 # Command-line (credentials, options, etc)
@@ -366,7 +368,7 @@ def get_creds_or_die(options):
             print >> sys.stderr, "Error retrieving credentials from file:\n\t%s" % e.strerror
             sys.exit(1)
     elif options.iam_role:
-        return Credentials(*get_role_creds(options.iam_role))
+        return get_role_creds(options.iam_role)
     else:
         return Credentials(options.access_key, options.secret_key)
 
@@ -454,6 +456,35 @@ class ProcessHelper(object):
 
         return ProcessResult(process.returncode, returnData[0], returnData[1])
 
+class LoggingProcessHelper(object):
+
+    def __init__(self, cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=None, cwd=None):
+      self.process_helper = ProcessHelper(cmd,stdout,stderr,env,cwd)
+      self.cmd = cmd
+
+    def call(self):
+        cmd_log.info(60*"=")
+        cmd_log.info("Running command \"%s\"", self.cmd)
+        results = self.process_helper.call()
+        output = results.stdout
+        stderr = results.stderr
+        if output:
+          cmd_log.info("Command Output".center(60,'-'))
+          for line in output.splitlines(False):
+            cmd_log.info('\t' + line)
+          cmd_log.info(60*"-")
+        if stderr:
+          cmd_log.info("Command Errors".center(60,'-'))
+          for line in stderr.splitlines(False):
+            cmd_log.error('\t' + line)
+          cmd_log.info(60*"-")
+        if results.returncode:
+          cmd_log.error("Exited with error code %d", results.returncode)
+        else:
+          cmd_log.info("Completed successfully.")
+        return results
+
+
 
 class Credentials(object):
     '''
@@ -481,6 +512,47 @@ class Credentials(object):
     @property
     def expiration(self):
         return self._expiration
+
+
+class RoleBasedCredentials(object):
+    '''
+    Refreshing credentials
+    '''
+
+    def __init__(self, role_name):
+        self._role_name = role_name
+        self._creds = None
+        self._refresh_lock = threading.Lock()
+        self._refresh()
+
+    def _refresh(self):
+        with self._refresh_lock:
+            if not self._creds or self._creds.expiration - datetime.timedelta(hours=2) < datetime.datetime.utcnow():
+                log.info('Refreshing role-based credentials')
+                try:
+                    self._creds = get_role_creds(self._role_name)
+                except IOError:
+                    if not self._creds or self._creds.expiration < datetime.datetime.utcnow():
+                        raise RuntimeError('Credentials have expired and refresh failed.')
+                    log.exception('Exception while refreshing credentials; will refresh on next access')
+
+            return self._creds
+
+    @property
+    def access_key(self):
+        return self._refresh().access_key
+
+    @property
+    def secret_key(self):
+        return self._refresh().secret_key
+
+    @property
+    def security_token(self):
+        return self._refresh().security_token
+
+    @property
+    def expiration(self):
+        return self._refresh().expiration
 
 def log_response(resp, *args, **kwargs):
     wire_log.debug('Response: %s %s [headers: %s]', resp.status_code, resp.url, resp.headers)

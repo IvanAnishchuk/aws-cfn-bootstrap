@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import urllib
+import operator
 from cfnbootstrap.packages.requests.auth import AuthBase, HTTPBasicAuth
 import base64
 import datetime
@@ -27,17 +29,110 @@ log = logging.getLogger("cfn.init")
 
 class S3Signer(object):
 
-    def __init__(self, access_key, secret_key, token=None):
-        self._access_key = access_key
-        self._secret_key = secret_key
-        self._token = token
+    def __init__(self, creds, region=None):
+        self._creds = creds
+        self._region = region
+        self._nowfunction = datetime.datetime.utcnow
+
+    def sign(self, req):
+        full_url = req.full_url if hasattr(req, 'full_url') else req.url
+        region = self._extract_region(full_url) if not self._region else self._region
+
+        if not region:
+            log.warn('Falling back to Signature Version 2 as no region was specified in S3 URL')
+            return S3V2Signer(self._creds).sign(req)
+
+        parsed = urlparse.urlparse(full_url)
+
+        timestamp = self._nowfunction()
+        timestamp_formatted = timestamp.strftime('%Y%m%dT%H%M%SZ')
+        timestamp_short = timestamp.strftime('%Y%m%d')
+
+        scope =  timestamp_short + '/' + region + '/s3/aws4_request'
+
+        req.headers['x-amz-date'] = timestamp_formatted
+        if self._creds.security_token:
+            req.headers['x-amz-security-token'] = self._creds.security_token
+        req.headers['host'] = parsed.netloc
+
+        hashed_payload = hashlib.sha256(req.body if req.body is not None else '').hexdigest()
+        req.headers['x-amz-content-sha256'] = hashed_payload
+
+        canonical_request = req.method + '\n'
+        canonical_request += self._canonicalize_uri(full_url) + '\n'
+        canonical_request += self._canonicalize_query(urlparse.parse_qs(parsed.query, True)) + '\n'
+
+        headers_to_sign = req.headers.copy()
+        (canonical_headers, signed_headers) = self._canonicalize_headers(headers_to_sign)
+        canonical_request += canonical_headers + '\n' + signed_headers + '\n'
+        canonical_request += hashed_payload
+
+        string_to_sign = 'AWS4-HMAC-SHA256\n' + timestamp_formatted + '\n' + scope + '\n' + hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+
+        derived_key = hmac.new(("AWS4" + self._creds.secret_key).encode('utf-8'), timestamp_short.encode('utf-8'), hashlib.sha256).digest()
+        derived_key = hmac.new(derived_key, region.encode('utf-8'), hashlib.sha256).digest()
+        derived_key = hmac.new(derived_key, 's3'.encode('utf-8'), hashlib.sha256).digest()
+        derived_key = hmac.new(derived_key, "aws4_request".encode('utf-8'), hashlib.sha256).digest()
+
+        signature = hmac.new(derived_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        credential = self._creds.access_key + '/' + scope
+        req.headers['Authorization'] = 'AWS4-HMAC-SHA256 Credential=%s,SignedHeaders=%s,Signature=%s' % (credential, signed_headers, signature)
+
+        return req
+
+    def _extract_region(self, full_url):
+        url = urlparse.urlparse(full_url)
+        match = re.match(r'^(([-\w.]+?)\.)?s3[-.]([\w\d-]+).amazonaws.*$', url.netloc, re.IGNORECASE)
+        if match:
+            if match.group(3).startswith('external'):
+                return 'us-east-1'
+            return match.group(3)
+        return None
+
+    def _canonicalize_uri(self, uri):
+        split = urlparse.urlsplit(uri)
+        if not split.path:
+            return '/'
+        path = urlparse.urlsplit(urlparse.urljoin('http://foo.com', split.path.lstrip('/'))).path
+        return urllib.quote(path, '/~') if path else '/'
+
+    def _canonicalize_query(self, params):
+        if not params:
+            return ''
+        encoded_pairs = []
+        for entry in params.iteritems():
+            for value in entry[1]:
+                encoded_pairs.append((urllib.quote(entry[0], '~'), urllib.quote(value, '~') if value else ''))
+
+        sorted_pairs = sorted(encoded_pairs, key=operator.itemgetter(0, 1))
+
+        return '&'.join(('='.join(pair) for pair in sorted_pairs))
+
+    def _canonicalize_headers(self, headers):
+        canon_headers = {}
+        for key, value in ((key.lower(), re.sub(r'(?su)[\s]+', ' ', value).strip()) for key, value in headers.iteritems()):
+            if key in canon_headers:
+                canon_headers[key] = canon_headers[key] + ',' + value
+            else:
+                canon_headers[key] = value
+
+        sorted_entries = sorted(canon_headers.iteritems(), key=operator.itemgetter(0))
+
+        return '\n'.join((':'.join(entry) for entry in sorted_entries)) + '\n', ';'.join((entry[0] for entry in sorted_entries))
+
+
+class S3V2Signer(object):
+
+    def __init__(self, creds):
+        self._creds = creds
 
     def sign(self, req):
         if 'Date' not in req.headers:
             req.headers['X-Amz-Date'] = datetime.datetime.utcnow().replace(microsecond=0).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-        if self._token:
-            req.headers['x-amz-security-token'] = self._token
+        if self._creds.security_token:
+            req.headers['x-amz-security-token'] = self._creds.security_token
 
         stringToSign = req.method + '\n'
         stringToSign += req.headers.get('content-md5', '') + '\n'
@@ -46,9 +141,9 @@ class S3Signer(object):
         stringToSign += self._canonicalize_headers(req)
         stringToSign += self._canonicalize_resource(req)
 
-        signed = base64.encodestring(hmac.new(self._secret_key.encode('utf-8'), stringToSign.encode('utf-8'), hashlib.sha1).digest()).strip()
+        signed = base64.encodestring(hmac.new(self._creds.secret_key.encode('utf-8'), stringToSign.encode('utf-8'), hashlib.sha1).digest()).strip()
 
-        req.headers['Authorization'] = 'AWS %s:%s' % (self._access_key, signed)
+        req.headers['Authorization'] = 'AWS %s:%s' % (self._creds.access_key, signed)
 
         return req
 
@@ -58,7 +153,7 @@ class S3Signer(object):
 
     def _canonicalize_resource(self, req):
         url = urlparse.urlparse(req.full_url if hasattr(req, 'full_url') else req.url)
-        match = re.match(r'^([-\w.]+?)\.s3(-[\w\d-]+)?.amazonaws.com$', url.netloc, re.IGNORECASE)
+        match = re.match(r'^([-\w.]+?)\.s3([-.][\w\d-]+)?.amazonaws.*', url.netloc, re.IGNORECASE)
         if match:
             return '/' + match.group(1) + url.path
         return url.path
@@ -79,7 +174,7 @@ class S3DefaultAuth(AuthBase):
 
     def _extract_bucket(self, req):
         url = urlparse.urlparse(req.full_url if hasattr(req, 'full_url') else req.url)
-        match = re.match(r'^([-\w.]+?\.)?s3(-[\w\d-]+)?.amazonaws.com$', url.netloc, re.IGNORECASE)
+        match = re.match(r'^([-\w.]+?\.)?s3([-.][\w\d-]+)?.amazonaws.*$', url.netloc, re.IGNORECASE)
         if not match:
             # Not an S3 URL, skip
             return None
@@ -98,12 +193,12 @@ class S3RoleAuth(AuthBase):
         self._roleName=roleName
 
     def __call__(self, req):
-        return S3Signer(*util.get_role_creds(self._roleName)).sign(req)
+        return S3Signer(util.get_role_creds(self._roleName)).sign(req)
 
 class S3Auth(AuthBase):
 
     def __init__(self, access_key, secret_key):
-        self._signer = S3Signer(access_key, secret_key)
+        self._signer = S3Signer(util.Credentials(access_key, secret_key))
 
     def __call__(self, req):
         return self._signer.sign(req)

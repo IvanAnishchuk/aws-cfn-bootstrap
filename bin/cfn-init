@@ -119,11 +119,15 @@ else:
 
 if Contractor.metadataValid(detail.metadata):
     try:
+        logging.info("Starting build".center(60,'-'))
         worklog.build(detail.metadata, configSets)
     except Exception, e:
+        logging.error("BUILD FAILED!".center(60,'-'))
         print >> sys.stderr, "Error occurred during build: %s" % str(e)
         logging.exception("Unhandled exception during build: %s" % str(e))
         sys.exit(1)
+    else:
+        logging.info("Build complete".center(60,'-'))
 else:
-    print >> sys.stderr, "No work to do, exiting."
+    print >> sys.stderr, "Could not find 'AWS::CloudFormation::Init' key in metadata for %s." % options.logical_resource_id
     sys.exit(0)

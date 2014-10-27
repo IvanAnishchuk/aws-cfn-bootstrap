@@ -23,7 +23,7 @@ class NullHandler(logging.Handler):
         pass
 
 _config ="""[loggers]
-keys=root,cfninit,cfnclient,cfnhup,wire
+keys=root,cfninit,cfnclient,cfnhup,wire,cmd
 [handlers]
 keys=%(all_handlers)s,null
 [formatters]
@@ -51,6 +51,11 @@ level=NOTSET
 handlers=%(root_handler)s
 qualname=cfn.client
 propagate=0
+[logger_cmd]
+level=NOTSET
+handlers=%(cmd_handler)s
+qualname=cfn.init.cmd
+propagate=0
 [handler_default]
 class=handlers.RotatingFileHandler
 level=%(conf_level)s
@@ -64,6 +69,11 @@ args=('%(wire_file)s', 'a', 5242880, 5, 'UTF-8')
 [handler_null]
 class=cfnbootstrap.NullHandler
 args=()
+[handler_cmd]
+class=handlers.RotatingFileHandler
+level=DEBUG
+formatter=amzn
+args=('%(cmd_file)s', 'a', 5242880, 5, 'UTF-8')
 [handler_tostderr]
 class=StreamHandler
 level=%(conf_level)s
@@ -75,32 +85,43 @@ datefmt=
 class=logging.Formatter
 """
 
-def _getLogFile(filename):
+def _getLogFile(log_dir, filename):
+    if log_dir:
+        return os.path.join(log_dir, filename)
     if os.name == 'nt':
         logdir = os.path.expandvars(r'${SystemDrive}\cfn\log')
         if not os.path.exists(logdir):
             os.makedirs(logdir)
         return logdir + os.path.sep + filename
-
     return '/var/log/%s' % filename
 
 
-def configureLogging(level='INFO', quiet=False, filename='cfn-init.log', log_dir=None, wire_log=True):
-    if not log_dir:
-        output_file=_getLogFile(filename)
-        wire_file =_getLogFile('cfn-wire.log') if wire_log else None
-    else:
-        output_file = os.path.join(log_dir, filename)
-        wire_file = os.path.join(log_dir, 'cfn-wire.log') if wire_log else None
+def configureLogging(level='INFO', quiet=False, filename='cfn-init.log', log_dir=None, wire_log=True, cmd_log=True):
+
+    output_file = _getLogFile(log_dir, filename)
 
     config = {'conf_level': level,
-              'all_handlers': 'default' + (',wire' if wire_log else ''),
               'root_handler' : 'default',
-              'wire_handler': 'wire' if wire_log else 'null',
               'conf_file': output_file}
+    all_handlers = ["default"]
 
-    if wire_file:
-        config['wire_file'] = wire_file
+    if wire_log:
+      wire_file =_getLogFile(log_dir,'cfn-wire.log')
+      config['wire_file'] = wire_file
+      config['wire_handler'] = 'wire' 
+      all_handlers.append("wire")
+    else:
+      config['wire_handler'] = 'null' 
+
+    if cmd_log:
+      cmd_file =_getLogFile(log_dir,'cfn-init-cmd.log') 
+      config['cmd_file'] = cmd_file
+      config['cmd_handler'] = 'cmd' 
+      all_handlers.append("cmd")
+    else:
+      config['cmd_handler'] = 'null' 
+
+    config['all_handlers'] = ','.join(all_handlers)
 
     try:
         logging.config.fileConfig(StringIO.StringIO(_config), config)
@@ -108,6 +129,7 @@ def configureLogging(level='INFO', quiet=False, filename='cfn-init.log', log_dir
         config['all_handlers'] = 'tostderr'
         config['root_handler'] = 'tostderr'
         config['wire_handler'] = 'null'
+        config['cmd_handler']  = 'null'
         if not quiet:
             print >> sys.stderr, "Could not open %s for logging.  Using stderr instead." % output_file
         logging.config.fileConfig(StringIO.StringIO(_config), config)

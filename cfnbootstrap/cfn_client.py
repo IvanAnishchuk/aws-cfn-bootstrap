@@ -44,9 +44,14 @@ class CloudFormationClient(aws_client.Client):
     - Public methods of this class have a 1-to-1 equivalence to published CloudFormation APIs.
     - Calls are retried internally when appropriate; callers should not retry.
 
+    Attributes:
+    _apiVersion - the CloudFormation API version
+    _endpoints  - CloudFormation service endpoints differing from the https://cloudformation.<region>.amazonaws.com format
+
     """
 
     _apiVersion = "2010-05-15"
+    _endpoints = { "cn-north-1": "https://cloudformation.cn-north-1.amazonaws.com.cn" }
 
     def __init__(self, credentials, url=None, region='us-east-1', proxyinfo=None):
 
@@ -56,6 +61,11 @@ class CloudFormationClient(aws_client.Client):
             endpoint = url
 
         self.using_instance_identity = (not credentials or not credentials.access_key) and util.is_ec2()
+
+        if not self.using_instance_identity and (not credentials or not credentials.access_key or not credentials.secret_key):
+            raise ValueError('In order to sign requests, 169.254.169.254 must be accessible or valid credentials must '
+                             'be set. Please ensure your proxy environment variables allow access to 169.254.169.254 '
+                             '(NO_PROXY) or that your credentials have a valid access key and secret key.')
 
         if not self.using_instance_identity:
             if not region:
@@ -72,6 +82,8 @@ class CloudFormationClient(aws_client.Client):
 
     @classmethod
     def endpointForRegion(cls, region):
+        if region in CloudFormationClient._endpoints:
+            return CloudFormationClient._endpoints[region]
         return 'https://cloudformation.%s.amazonaws.com' % region
 
     @classmethod
@@ -93,11 +105,32 @@ class CloudFormationClient(aws_client.Client):
         log.debug("Describing resource %s in stack %s", logicalResourceId, stackName)
 
         return StackResourceDetail(self._call({"Action" : "DescribeStackResource",
-                                                           "LogicalResourceId" : logicalResourceId,
-                                                           "ContentType" : "JSON",
-                                                           "StackName": stackName,
-                                                           "Version": CloudFormationClient._apiVersion },
-                                                           request_credentials=request_credentials))
+                                               "LogicalResourceId" : logicalResourceId,
+                                               "ContentType" : "JSON",
+                                               "StackName": stackName,
+                                               "Version": CloudFormationClient._apiVersion },
+                                               request_credentials=request_credentials))
+
+    @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
+    @timeout()
+    def signal_resource(self, logicalResourceId, stackName, uniqueId, status="SUCCESS", request_credentials=None):
+        """
+        Calls SignalResource.
+
+        Throws an IOError on failure.
+        """
+        log.debug("Signaling resource %s in stack %s with unique ID %s and status %s", logicalResourceId,
+                                                                                       stackName,
+                                                                                       uniqueId,
+                                                                                       status)
+        self._call({"Action": "SignalResource",
+                    "LogicalResourceId": logicalResourceId,
+                    "StackName": stackName,
+                    "UniqueId": uniqueId,
+                    "Status": status,
+                    "ContentType": "JSON",
+                    "Version": CloudFormationClient._apiVersion },
+                    request_credentials=request_credentials)
 
     @retry_on_failure(http_error_extractor=aws_client.Client._extract_json_message)
     @timeout()
