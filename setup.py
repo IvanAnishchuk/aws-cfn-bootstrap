@@ -27,17 +27,16 @@ if sys.version_info[0] == 2 and sys.version_info[1] < 6:
         sys.exit(1)
 
 rpm_requires = ['python >= 2.6', 'python-daemon', 'pystache']
-dependencies = ['python-daemon>=1.5.2', 'pystache>=0.4.0']
+dependencies = ['python-daemon>=1.5.2,<2.0', 'pystache>=0.4.0']
 
 _distclass = Distribution
 _opts = {
          'build_scripts': { 'executable': '/usr/bin/env python' },
          'bdist_rpm' : { 'requires' : rpm_requires }
         }
-_data_files = [('share/doc/%s-%s' % (name, version), ['license/NOTICE.txt', 'license/LICENSE.txt']),
+_data_files = [('share/doc/%s-%s' % (name, version), ['license/NOTICE.txt', 'license/LICENSE.txt', 'CHANGELOG.txt']),
                ('init/redhat', ['init/redhat/cfn-hup']),
-               ('init/ubuntu', ['init/ubuntu/cfn-hup']),
-               ('', ['CHANGELOG.txt'])]
+               ('init/ubuntu', ['init/ubuntu/cfn-hup'])]
 try:
     import py2exe
     class WindowsDistribution(Distribution):

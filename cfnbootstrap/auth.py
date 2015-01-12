@@ -35,7 +35,9 @@ class S3Signer(object):
         self._nowfunction = datetime.datetime.utcnow
 
     def sign(self, req):
-        full_url = req.full_url if hasattr(req, 'full_url') else req.url
+        # Requests only quotes illegal characters in a URL, leaving reserved chars.
+        # We want to fully quote the URL, so we first unquote the url before requoting it in our signature calculation
+        full_url = urllib.unquote(req.full_url if hasattr(req, 'full_url') else req.url)
         region = self._extract_region(full_url) if not self._region else self._region
 
         if not region:
@@ -174,7 +176,7 @@ class S3DefaultAuth(AuthBase):
 
     def _extract_bucket(self, req):
         url = urlparse.urlparse(req.full_url if hasattr(req, 'full_url') else req.url)
-        match = re.match(r'^([-\w.]+?\.)?s3([-.][\w\d-]+)?.amazonaws.*$', url.netloc, re.IGNORECASE)
+        match = re.match(r'^([-\w.]+\.)?s3([-.][\w\d-]+)?.amazonaws.*$', url.netloc, re.IGNORECASE)
         if not match:
             # Not an S3 URL, skip
             return None
