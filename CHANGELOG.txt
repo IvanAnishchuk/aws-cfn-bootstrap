@@ -1,3 +1,9 @@
+* Fri May 01 2015 - mhhinkle (at) amazon.com
+- Validate S3 URLs against an explicit list of accepted patterns.
+
+* Wed Mar 25 2015 - adamthom (at) amazon.com
+- Update the bundled Requests to 2.6.0
+
 * Fri Jan 09 2015 - adamthom (at) amazon.com
 - Allow the certificate bundle to be overridden using CA_OVERRIDE env. variable or /etc/cfn/ca-override.pem.
 - Fix an issue where spaces in S3 keys were not being encoded properly for Signature V4 requests.

@@ -49,6 +49,7 @@ import sys
 import time
 
 log = logging.getLogger("cfn.init")
+cmd_log = logging.getLogger("cfn.init.cmd")
 
 class WorkLog(object):
     """
@@ -494,6 +495,8 @@ class Contractor(object):
 
             configSet = collections.deque(self._configSets[configSetName])
             log.info("Running configSet %s", configSetName)
+            cmd_log.info("*"*60)
+            cmd_log.info("ConfigSet %s", configSetName)
             while configSet:
                 config = configSet.popleft()
 
@@ -507,6 +510,9 @@ class Contractor(object):
 
     def run_config(self, config, worklog):
         log.info("Running config %s", config.name)
+        cmd_log.info("+"*60)
+        cmd_log.info("Config %s", config.name)
+        
         try:
             CloudFormationCarpenter(config, self._auth_config).build(worklog)
 

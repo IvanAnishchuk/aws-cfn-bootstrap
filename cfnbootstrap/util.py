@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #==============================================================================
+import endpoint_tool
 import hashlib
 from optparse import OptionGroup
 import threading
@@ -76,7 +77,7 @@ class EtagCheckedResponse(object):
 
     def __init__(self, response):
         self._response = check_status(response)
-        etag = response.headers['etag'].strip('"') if 'etag' in response.headers and is_s3_url(response.url) else None
+        etag = response.headers['etag'].strip('"') if 'etag' in response.headers and endpoint_tool.is_service_url("AmazonS3", response.url) else None
         if etag and '-' in etag:
             log.warn('cannot check consistency of file uploaded multipart; etag has - character present')
             etag = None
@@ -319,9 +320,6 @@ def extract_value(metadata, path):
 
     return return_data
 
-def is_s3_url(url):
-    return re.match(r'https?://([-\w.]+?\.)?s3([-.][\w\d-]+)?.amazonaws.*', url, re.IGNORECASE) is not None
-
 #==============================================================================
 # Command-line (credentials, options, etc)
 #==============================================================================
@@ -458,30 +456,31 @@ class ProcessHelper(object):
 
 class LoggingProcessHelper(object):
 
-    def __init__(self, cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=None, cwd=None):
-      self.process_helper = ProcessHelper(cmd,stdout,stderr,env,cwd)
-      self.cmd = cmd
+    def __init__(self, cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, name='', env=None, cwd=None):
+        self.name = name
+        self.process_helper = ProcessHelper(cmd,stdout,stderr,env,cwd)
+        self.cmd = cmd
 
     def call(self):
         cmd_log.info(60*"=")
-        cmd_log.info("Running command \"%s\"", self.cmd)
+        cmd_log.info(self.name)
         results = self.process_helper.call()
         output = results.stdout
         stderr = results.stderr
         if output:
-          cmd_log.info("Command Output".center(60,'-'))
-          for line in output.splitlines(False):
-            cmd_log.info('\t' + line)
-          cmd_log.info(60*"-")
+            cmd_log.info("Command Output".center(60,'-'))
+            for line in output.splitlines(False):
+                cmd_log.info('\t' + line)
+            cmd_log.info(60*"-")
         if stderr:
-          cmd_log.info("Command Errors".center(60,'-'))
-          for line in stderr.splitlines(False):
-            cmd_log.error('\t' + line)
-          cmd_log.info(60*"-")
+            cmd_log.info("Command Errors".center(60,'-'))
+            for line in stderr.splitlines(False):
+                cmd_log.error('\t' + line)
+            cmd_log.info(60*"-")
         if results.returncode:
-          cmd_log.error("Exited with error code %d", results.returncode)
+            cmd_log.error("Exited with error code %d", results.returncode)
         else:
-          cmd_log.info("Completed successfully.")
+            cmd_log.info("Completed successfully.")
         return results
 
 

@@ -81,7 +81,7 @@ class CommandTool(object):
             if "test" in attributes:
                 log.debug(u"Running test for command %s", name)
                 test = attributes["test"]
-                testResult = ProcessHelper(test, env=env, cwd=cwd).call()
+                testResult = LoggingProcessHelper(test, name=u'Test for Command %s' % name, env=env, cwd=cwd).call()
                 log.debug(u"Test command output: %s", testResult.stdout.decode('utf-8'))
                 if testResult.returncode:
                     log.info(u"Test failed with code %s", testResult.returncode)
@@ -101,7 +101,7 @@ class CommandTool(object):
                 else:
                     cmd_to_run = ['su', attributes['runas'], '-c'] + cmd_to_run
 
-            commandResult = LoggingProcessHelper(cmd_to_run, env=env, cwd=cwd).call()
+            commandResult = LoggingProcessHelper(cmd_to_run, name=u'Command %s' % name, env=env, cwd=cwd).call()
 
             if commandResult.returncode:
                 log.error(u"Command %s (%s) failed", name, attributes["command"])

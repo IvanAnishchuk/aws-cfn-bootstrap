@@ -15,6 +15,7 @@
 #==============================================================================
 import threading
 from cfnbootstrap import util
+from cfnbootstrap.aws_client import AwsQueryError
 from cfnbootstrap.cfn_client import CloudFormationClient
 from cfnbootstrap.sqs_client import SQSClient
 from cfnbootstrap.util import ProcessHelper
@@ -322,7 +323,12 @@ class CmdProcessor(object):
         return self._creds_provider.creds_expired()
 
     def register(self):
-        self.queue_url = self.cfn_client.register_listener(self.stack_name, self.listener_id).queue_url
+        try:
+            self.queue_url = self.cfn_client.register_listener(self.stack_name, self.listener_id).queue_url
+        except AwsQueryError, e:
+            if e.error_code == 'ValidationError':
+                raise FatalUpdateError('Terminal failure registering listener: %s' % str(e))
+            raise
         self._creds_provider.listener_expired = False
 
     def _create_storage_dir(self):

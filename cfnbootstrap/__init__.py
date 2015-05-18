@@ -27,7 +27,7 @@ keys=root,cfninit,cfnclient,cfnhup,wire,cmd
 [handlers]
 keys=%(all_handlers)s,null
 [formatters]
-keys=amzn
+keys=amzn,amzn_cmd
 [logger_root]
 level=NOTSET
 handlers=%(root_handler)s
@@ -72,7 +72,7 @@ args=()
 [handler_cmd]
 class=handlers.RotatingFileHandler
 level=DEBUG
-formatter=amzn
+formatter=amzn_cmd
 args=('%(cmd_file)s', 'a', 5242880, 5, 'UTF-8')
 [handler_tostderr]
 class=StreamHandler
@@ -81,6 +81,10 @@ formatter=amzn
 args=(sys.stderr,)
 [formatter_amzn]
 format=%(asctime)s [%(levelname)s] %(message)s
+datefmt=
+class=logging.Formatter
+[formatter_amzn_cmd]
+format=%(asctime)s P%(process)d [%(levelname)s] %(message)s
 datefmt=
 class=logging.Formatter
 """

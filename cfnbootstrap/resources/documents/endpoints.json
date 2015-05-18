@@ -1,0 +1,22 @@
+{
+    "Services": {
+        "AmazonS3": {
+            "Endpoints": [
+                { "Region": "us-east-1", "Hostname": "s3.amazonaws.com", "Default": true },
+                { "Region": "us-east-1", "Hostname": "s3-external-1.amazonaws.com" },
+                { "Region": "us-east-1", "Hostname": "s3-external-2.amazonaws.com" },
+                { "Region": "us-west-2", "Hostname": "s3-us-west-2.amazonaws.com" },
+                { "Region": "us-west-1", "Hostname": "s3-us-west-1.amazonaws.com" },
+                { "Region": "eu-west-1", "Hostname": "s3-eu-west-1.amazonaws.com" },
+                { "Region": "eu-central-1", "Hostname": "s3.eu-central-1.amazonaws.com" },
+                { "Region": "eu-central-1", "Hostname": "s3-eu-central-1.amazonaws.com" },
+                { "Region": "ap-southeast-1", "Hostname": "s3-ap-southeast-1.amazonaws.com" },
+                { "Region": "ap-southeast-2", "Hostname": "s3-ap-southeast-2.amazonaws.com" },
+                { "Region": "ap-northeast-1", "Hostname": "s3-ap-northeast-1.amazonaws.com" },
+                { "Region": "sa-east-1", "Hostname": "s3-sa-east-1.amazonaws.com" },
+                { "Region": "us-gov-west-1", "Hostname": "s3-us-gov-west-1.amazonaws.com" },
+                { "Region": "cn-north-1", "Hostname": "s3.cn-north-1.amazonaws.com.cn" }
+            ]
+        }
+    }
+}
