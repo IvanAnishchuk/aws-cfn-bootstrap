@@ -17,8 +17,18 @@ import copy
 import imp
 import logging
 import os
-import pkg_resources
 import sys
+
+# Imports define which python packages are added to the windows installer when we build it
+# Importing pkg_resources causes import errors since six.py is a dependency it cannot resolve
+# as the rest of setuptools is missing, so we don't import it in windows exe's as it isn't used anyway
+def _is_from_exe():
+    return (hasattr(sys, "frozen") or  # new py2exe
+           hasattr(sys, "importers")  # old py2exe
+           or imp.is_frozen("__main__"))
+
+if not _is_from_exe():
+    import pkg_resources
 
 log = logging.getLogger(__name__)
 
@@ -38,10 +48,7 @@ endpoint_override_path = os.getenv("ENDPOINTS_OVERRIDE", endpoint_override_path)
 
 try:
     #Modification for compilation by py2exe:
-    if (hasattr(sys, "frozen") or  # new py2exe
-           hasattr(sys, "importers")  # old py2exe
-           or imp.is_frozen("__main__")):  # tools/freeze
-
+    if _is_from_exe():
         #Load endpoints.json from .exe directory, i.e. C:\Program Files\Amazon\cfn-bootstrap
         log.debug('Loading py2exe endpoints.json file')
         with open(os.path.join(os.path.dirname(sys.executable), 'endpoints.json'), 'r') as f:

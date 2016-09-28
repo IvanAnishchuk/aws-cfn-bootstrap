@@ -24,6 +24,7 @@ Message  - a message from an SQS queue
 from cfnbootstrap import aws_client
 from cfnbootstrap.aws_client import V4Signer
 from cfnbootstrap.util import retry_on_failure, timeout
+from cfnbootstrap import endpoint_tool
 from xml.etree import ElementTree
 import StringIO
 import logging
@@ -42,14 +43,11 @@ class SQSClient(aws_client.Client):
     Attributes:
     _apiVersion - the SQS API version
     _xmlns      - the XML namespace for the SQS API version in use
-    _endpoints  - SQS service endpoints differing from the https://<region>.queue.amazonaws.com format
 
     """
 
     _apiVersion = "2012-11-05"
     _xmlns='http://queue.amazonaws.com/doc/%s/' % _apiVersion
-    _endpoints = { 'us-east-1': 'https://queue.amazonaws.com',
-                   'cn-north-1': 'https://cn-north-1.queue.amazonaws.com.cn' }
 
     def __init__(self, credentials, url=None, region='us-east-1', proxyinfo=None):
         if not url:
@@ -71,29 +69,28 @@ class SQSClient(aws_client.Client):
     # SQS SSL certificates have CNs based on queue.amazonaws.com
     # Python2.6 will fail to verify the hostname of the certificate
     # Due to http://bugs.python.org/issue13034 only being fixed in 2.7 and 3.2
-    def _fix_endpoint(self, url):
-        m = re.match(r'^https://sqs\.(.*?)\.amazonaws\.com(.*)$', url)
+    # For cn-north-1, the last 3 charachters ".cn" needs to be removed since
+    # it appears in both hostname and second subgroup of the match
+    def _fix_endpoint(self, unparsed_url):
+        m = re.match(r'^https://sqs\.(.*?)\.amazonaws\.com(.*)$', unparsed_url)
         if m:
-            if m.group(1) == 'us-east-1':
-                return 'https://queue.amazonaws.com%s' % m.group(2)
-            return 'https://%s.queue.amazonaws.com%s' % m.group(1, 2)
-        return url
+            for endpoint in endpoint_tool.get_endpoints_for_service("AmazonSQS"):
+                if endpoint.region == m.group(1):
+                    return 'https://%s%s' % (endpoint.hostname if endpoint.region != "cn-north-1" else endpoint.hostname[:-3], m.group(2))
+        return unparsed_url
 
     @classmethod
     def endpointForRegion(cls, region):
-        if region in SQSClient._endpoints:
-            return SQSClient._endpoints[region]
+        for endpoint in endpoint_tool.get_endpoints_for_service("AmazonSQS"):
+            if endpoint.region == region:
+                return 'https://%s' % endpoint.hostname
         return 'https://%s.queue.amazonaws.com' % region
 
     @classmethod
-    def regionForEndpoint(cls, endpoint):
-        match = re.match(r'https://([\w\d-]+).queue.amazonaws.com', endpoint)
-        if match:
-            return match.group(1)
-        inverse_endpoints = dict((v,k) for k, v in SQSClient._endpoints.iteritems())
-        if endpoint in inverse_endpoints:
-            return inverse_endpoints[endpoint]
-        log.warn("Non-standard SQS endpoint: %s", endpoint)
+    def regionForEndpoint(cls, parsed_url):
+        for endpoint in endpoint_tool.get_endpoints_for_service("AmazonSQS"):
+            if parsed_url == 'https://%s' % endpoint.hostname:
+                return endpoint.region
         return None
 
     @retry_on_failure(http_error_extractor=aws_client.Client._get_xml_extractor(_xmlns))

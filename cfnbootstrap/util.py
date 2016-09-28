@@ -78,7 +78,10 @@ class EtagCheckedResponse(object):
     def __init__(self, response):
         self._response = check_status(response)
         etag = response.headers['etag'].strip('"') if 'etag' in response.headers and endpoint_tool.is_service_url("AmazonS3", response.url) else None
-        if etag and '-' in etag:
+        if response.headers.get('x-amz-server-side-encryption') == 'aws:kms':
+            log.warn('file uses KMS encryption; skipping checksum comparison')
+            etag = None
+        elif etag and '-' in etag:
             log.warn('cannot check consistency of file uploaded multipart; etag has - character present')
             etag = None
 

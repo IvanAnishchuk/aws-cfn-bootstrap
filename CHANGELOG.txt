@@ -1,3 +1,6 @@
+* Fri Nov 20 2015 - xinningl (at) amazon.com
+- Validate SQS URLs against an explicit list of accepted patterns.
+
 * Fri May 01 2015 - mhhinkle (at) amazon.com
 - Validate S3 URLs against an explicit list of accepted patterns.
 

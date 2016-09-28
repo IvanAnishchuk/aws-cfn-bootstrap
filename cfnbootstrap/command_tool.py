@@ -67,9 +67,13 @@ class CommandTool(object):
                     log.error(u"Defaults script failed for %s: %s", name, defaultsResult.stderr.decode('utf-8'))
                     raise ToolError(u"Defaults script for command %s failed" % name)
 
-                old_attrs = attributes
+                default_attrs = attributes
+                default_env = default_attrs.get("env",{})
                 attributes = json.loads(defaultsResult.stdout)
-                attributes.update(old_attrs)
+                user_env = attributes.get("env",{})
+                user_env.update(default_env)
+                attributes.update(default_attrs)
+                attributes["env"] = user_env
 
             if not "command" in attributes:
                 log.error(u"No command specified for %s", name)

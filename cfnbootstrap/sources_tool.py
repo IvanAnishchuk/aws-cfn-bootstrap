@@ -20,6 +20,7 @@ from tarfile import TarError
 from zipfile import BadZipfile
 import logging
 import os.path
+from os import chmod 
 import re
 from cfnbootstrap.packages import requests
 import shutil
@@ -148,6 +149,9 @@ class ZipWrapper(object):
 
     def __init__(self, f):
         self.file = zipfile.ZipFile(f, mode='r')
+        # change encoding of all filenames to UTF-8 so that Unicode chars aren't treated as ASCII
+        for info in self.file.infolist():
+            info.filename = unicode(info.orig_filename, 'utf8')
 
     @classmethod
     def is_compatible(cls, f):
@@ -163,12 +167,25 @@ class ZipWrapper(object):
         return (info.filename for info in self.file.infolist())
 
     def extract_all(self, dest):
-        self.file.extractall(dest)
+        """
+        The zipfile module doesn't preserve file permissions when extracting, so
+        each file needs to have its mode changed via chmod after extracting it.
+        The file's original permission bits are stored in the external attributes of 
+        the file's ZipInfo object, and we retrieve them by shifting right 16 bits.
+        """
+        for info in self.file.infolist():
+            ext_attr = info.external_attr
+            mode = ext_attr >> 16
+            target_path = self.file.extract(info, dest)
+            chmod(target_path, mode)
 
 class TarWrapper(object):
 
     def __init__(self, f):
         self.file = tarfile.open(fileobj = f, mode='r:*')
+        # change encoding of all filenames to UTF-8 so that Unicode chars aren't treated as ASCII
+        for member in self.file.getmembers():
+            member.name = unicode(member.name, 'utf8')
 
     @classmethod
     def is_compatible(cls, f):
