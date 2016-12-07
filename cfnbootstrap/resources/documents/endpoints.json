@@ -4,12 +4,15 @@
             "Endpoints": [
                 { "Region": "us-east-1", "Hostname": "s3.amazonaws.com", "Default": true },
                 { "Region": "us-east-1", "Hostname": "s3-external-1.amazonaws.com" },
+                { "Region": "us-east-2", "Hostname": "s3-us-east-2.amazonaws.com" },
+                { "Region": "us-east-2", "Hostname": "s3.us-east-2.amazonaws.com" },
                 { "Region": "us-east-1", "Hostname": "s3-external-2.amazonaws.com" },
                 { "Region": "us-west-2", "Hostname": "s3-us-west-2.amazonaws.com" },
                 { "Region": "us-west-1", "Hostname": "s3-us-west-1.amazonaws.com" },
                 { "Region": "eu-west-1", "Hostname": "s3-eu-west-1.amazonaws.com" },
                 { "Region": "eu-central-1", "Hostname": "s3.eu-central-1.amazonaws.com" },
                 { "Region": "eu-central-1", "Hostname": "s3-eu-central-1.amazonaws.com" },
+                { "Region": "ca-central-1", "Hostname": "s3-ca-central-1.amazonaws.com" },
                 { "Region": "ap-south-1", "Hostname": "s3-ap-south-1.amazonaws.com" },
                 { "Region": "ap-south-1", "Hostname": "s3.ap-south-1.amazonaws.com" },
                 { "Region": "ap-southeast-1", "Hostname": "s3-ap-southeast-1.amazonaws.com" },
@@ -25,10 +28,12 @@
         "AmazonSQS": {
             "Endpoints": [
                 { "Region": "us-east-1", "Hostname": "queue.amazonaws.com" },
+                { "Region": "us-east-2", "Hostname": "sqs.us-east-2.amazonaws.com" },
                 { "Region": "us-west-2", "Hostname": "us-west-2.queue.amazonaws.com" },
                 { "Region": "us-west-1", "Hostname": "us-west-1.queue.amazonaws.com" },
                 { "Region": "eu-west-1", "Hostname": "eu-west-1.queue.amazonaws.com" },
                 { "Region": "eu-central-1", "Hostname": "eu-central-1.queue.amazonaws.com" },
+                { "Region": "ca-central-1", "Hostname": "ca-central-1.queue.amazonaws.com" },
                 { "Region": "ap-south-1", "Hostname": "sqs.ap-south-1.amazonaws.com" },
                 { "Region": "ap-southeast-1", "Hostname": "ap-southeast-1.queue.amazonaws.com" },
                 { "Region": "ap-southeast-2", "Hostname": "ap-southeast-2.queue.amazonaws.com" },
