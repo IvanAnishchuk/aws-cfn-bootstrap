@@ -151,7 +151,8 @@ class ZipWrapper(object):
         self.file = zipfile.ZipFile(f, mode='r')
         # change encoding of all filenames to UTF-8 so that Unicode chars aren't treated as ASCII
         for info in self.file.infolist():
-            info.filename = unicode(info.orig_filename, 'utf8')
+            # correction for ticket: https://tt.amazon.com/0102261146
+            info.filename = unicode(info.filename, 'utf8')
 
     @classmethod
     def is_compatible(cls, f):
@@ -173,11 +174,16 @@ class ZipWrapper(object):
         The file's original permission bits are stored in the external attributes of 
         the file's ZipInfo object, and we retrieve them by shifting right 16 bits.
         """
+        
+        
+        
         for info in self.file.infolist():
             ext_attr = info.external_attr
             mode = ext_attr >> 16
             target_path = self.file.extract(info, dest)
-            chmod(target_path, mode)
+            # ignoring chmod for Windows (see ticket: https://tt.amazon.com/0103078545)
+            if os.name != 'nt':
+                chmod(target_path, mode)
 
 class TarWrapper(object):
 

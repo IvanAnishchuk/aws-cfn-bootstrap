@@ -21,6 +21,7 @@ import logging
 import os
 from cfnbootstrap.packages import requests
 import stat
+import codecs
 
 _templates_supported = True
 try:
@@ -122,9 +123,13 @@ class FileTool(object):
                     os.symlink(attribs["content"], filename)
                 else:
                     file_is_text = 'content' in attribs and not self._is_base64(attribs)
-                    with file(filename, 'w' + ('' if file_is_text else 'b')) as f:
-                        log.debug("Writing content to %s", filename)
-                        self._write_file(f, attribs, auth_config)
+                    log.debug("Writing content to %s", filename)
+                    if file_is_text:
+                        with codecs.open(filename, 'w', encoding='utf-8') as f:
+                            self._write_file(f, attribs, auth_config)
+                    else:
+                        with file(filename, 'wb') as f:
+                            self._write_file(f, attribs, auth_config)
 
                 if "mode" in attribs:
                     log.debug("Setting mode for %s to %s", filename, attribs["mode"])
