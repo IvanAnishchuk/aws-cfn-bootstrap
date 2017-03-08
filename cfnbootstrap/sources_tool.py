@@ -151,7 +151,6 @@ class ZipWrapper(object):
         self.file = zipfile.ZipFile(f, mode='r')
         # change encoding of all filenames to UTF-8 so that Unicode chars aren't treated as ASCII
         for info in self.file.infolist():
-            # correction for ticket: https://tt.amazon.com/0102261146
             info.filename = unicode(info.filename, 'utf8')
 
     @classmethod
@@ -181,7 +180,7 @@ class ZipWrapper(object):
             ext_attr = info.external_attr
             mode = ext_attr >> 16
             target_path = self.file.extract(info, dest)
-            # ignoring chmod for Windows (see ticket: https://tt.amazon.com/0103078545)
+            # ignoring chmod for Windows
             if os.name != 'nt':
                 chmod(target_path, mode)
 
