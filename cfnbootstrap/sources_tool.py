@@ -151,7 +151,8 @@ class ZipWrapper(object):
         self.file = zipfile.ZipFile(f, mode='r')
         # change encoding of all filenames to UTF-8 so that Unicode chars aren't treated as ASCII
         for info in self.file.infolist():
-            info.filename = unicode(info.filename, 'utf8')
+            if type(info.filename) != unicode:
+                info.filename = unicode(info.filename, 'utf8')
 
     @classmethod
     def is_compatible(cls, f):
