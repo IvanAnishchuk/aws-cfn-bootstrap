@@ -39,12 +39,12 @@ from cfnbootstrap.rpm_tools import RpmTool, YumTool
 from cfnbootstrap.service_tools import SysVInitTool, WindowsServiceTool
 from cfnbootstrap.sources_tool import SourcesTool
 from cfnbootstrap.user_group_tools import GroupTool, UserTool
+import cfnbootstrap.json_file_manager as JsonFileManager 
 import collections
 import contextlib
 import logging
 import operator
 import os.path
-import shelve
 import sys
 import time
 
@@ -57,60 +57,71 @@ class WorkLog(object):
     Useful for commands that cause restarts
     """
 
-    def __init__(self, dbname='resume_db'):
+    def __init__(self, dbname='resume_db.json'):
         if os.name == 'nt':
-            self._shelf_dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-init')
+            self._json_db_dir = os.path.expandvars(r'${SystemDrive}\cfn\cfn-init')
         else:
-            self._shelf_dir = '/var/lib/cfn-init'
+            self._json_db_dir = '/var/lib/cfn-init'
 
-        if not os.path.isdir(self._shelf_dir) and not os.path.exists(self._shelf_dir):
-            os.makedirs(self._shelf_dir)
+        if not os.path.isdir(self._json_db_dir) and not os.path.exists(self._json_db_dir):
+            os.makedirs(self._json_db_dir, 0600)
 
-        if not os.path.isdir(self._shelf_dir):
-            print >> sys.stderr, "Could not create %s to store the work log" % self._shelf_dir
-            logging.error("Could not create %s to store the work log", self._shelf_dir)
+        if not os.path.isdir(self._json_db_dir):
+            print >> sys.stderr, "Could not create %s to store the work log" % self._json_db_dir
+            logging.error("Could not create %s to store the work log", self._json_db_dir)
 
         self._dbname = dbname
+        self._jsonConverter = JsonFileManager.Converter([ConfigDefinition])
 
     def clear(self):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            shelf.clear()
+        JsonFileManager.create(self._json_db_dir, self._dbname);
 
     def clear_except_metadata(self):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            metadata = shelf.get('metadata')
-            shelf.clear()
-            if metadata:
-                shelf['metadata'] = metadata
+        json_data = JsonFileManager.read(self._json_db_dir, self._dbname)
+        metadata = json_data.get('metadata', None)
+        json_data = {}
+        if metadata != None:
+            json_data['metadata'] = metadata
+        JsonFileManager.write(self._json_db_dir, self._dbname, json_data)
 
     def put(self, key, data):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            if data:
-                shelf[key] = data
-            elif key in shelf:
-                del shelf[key]
+        json_data = JsonFileManager.read(self._json_db_dir, self._dbname)
+        if data:
+            json_data[key] = self._jsonConverter.serialize(data)
+        elif key in json_data:
+            del json_data[key]
+        JsonFileManager.write(self._json_db_dir, self._dbname, json_data)
 
     def has_key(self, key):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            return key in shelf
+        json_data = JsonFileManager.read(self._json_db_dir, self._dbname)
+        return key in json_data
 
     def get(self, key, default=None):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            return shelf.get(key, default)
+        json_data = JsonFileManager.read(self._json_db_dir, self._dbname)
+        if key in json_data:
+            return self._jsonConverter.deserialize(json_data[key])
+        else:
+            return default
 
     def delete(self, key):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            del shelf[key]
+        json_data = JsonFileManager.read(self._json_db_dir, self._dbname)
+        if key in json_data:
+            del json_data[key]
+            JsonFileManager.write(self._json_db_dir, self._dbname, json_data)
 
     def pop(self, key):
-        with contextlib.closing(shelve.open(os.path.join(self._shelf_dir, self._dbname))) as shelf:
-            value = shelf[key]
+        json_data = JsonFileManager.read(self._json_db_dir, self._dbname)
+        if key in json_data:
+            value = self._jsonConverter.deserialize(json_data[key])
             ret_val = value.popleft()
             if not value:
-                del shelf[key]
+                del json_data[key]
             else:
-                shelf[key] = value
-        return ret_val
+                json_data[key] = self._jsonConverter.serialize(value)
+            JsonFileManager.write(self._json_db_dir, self._dbname, json_data)
+            return ret_val
+        else:
+            return None
 
     def build(self, metadata, configSets):
         self.put('metadata', metadata)
@@ -121,7 +132,8 @@ class WorkLog(object):
         cmd_tool = CommandTool()
         while self.has_key('commands'):
             next_cmd = self.pop('commands')
-            changes = self.get('changes', collections.defaultdict(list))
+            changes = collections.defaultdict(list)
+            changes.update(self.get('changes', {}))
             cmd_options = next_cmd[1]
             command_changes = cmd_tool.apply({next_cmd[0]:cmd_options})
             changes['commands'].extend(command_changes)
@@ -311,6 +323,19 @@ class ConfigDefinition(object):
     def __str__(self):
         return 'Config(%s)' % self._name
 
+    def serialize(self, marker):
+        return {marker: self.__dict__}
+
+    @classmethod
+    def from_json(cls, json_data):
+        model = {}
+        for field in json_data:
+            prop = field[1:]
+            if field == '_name':
+                name = json_data[field]
+            else:
+                model[prop] = json_data[field]
+        return cls(name, model)
 
 class ConfigSetRef(object):
     """

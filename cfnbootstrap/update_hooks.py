@@ -20,14 +20,13 @@ from cfnbootstrap.cfn_client import CloudFormationClient
 from cfnbootstrap.sqs_client import SQSClient
 from cfnbootstrap.util import ProcessHelper
 from threading import Timer
+import cfnbootstrap.json_file_manager as JsonFileManager
 import ConfigParser
 import calendar
-import contextlib
 import datetime
 import logging
 import os
 import random
-import shelve
 import socket
 import subprocess
 import tempfile
@@ -557,7 +556,6 @@ class CmdProcessor(object):
         action_env['RESULT_SESSION_TOKEN'] = creds.security_token
         return action_env
 
-
 class HookProcessor(object):
     """Processes update hooks"""
 
@@ -575,28 +573,28 @@ class HookProcessor(object):
             except OSError:
                 log.warn("Could not create %s; using temporary directory", self.dir)
                 self.dir = tempfile.mkdtemp()
-
+        JsonFileManager.create(self.dir, 'metadata_db.json')
         self.client = client
         self.stack_name = stack_name
 
     def process(self):
-        with contextlib.closing(shelve.open('%s/metadata_db' % self.dir)) as shelf:
-            self._resource_cache = {}
-            for hook in self.hooks:
-                try:
-                    self._process_hook(hook, shelf)
-                except FatalUpdateError:
-                    raise
-                except Exception:
-                    log.exception("Exception caught while running hook %s", hook.name)
+        metadata = JsonFileManager.read(self.dir, 'metadata_db.json')
+        self._resource_cache = {}
+        for hook in self.hooks:
+            try:
+                self._process_hook(hook, metadata)
+            except FatalUpdateError:
+                raise
+            except Exception:
+                log.exception("Exception caught while running hook %s", hook.name)
 
-    def _process_hook(self, hook, shelf):
+    def _process_hook(self, hook, metadata):
         try:
             new_data = self._retrieve_path_data(hook.path)
         except InFlightStatusError:
             return
 
-        old_data = shelf.get(hook.name + "|" + hook.path, None)
+        old_data = metadata.get(hook.name + "|" + hook.path, None)
 
         if 'post.add' in hook.triggers and not old_data and new_data:
             log.info("Previous state not found; action for %s will be run", hook.name)
@@ -606,7 +604,8 @@ class HookProcessor(object):
             log.info("Data has changed from previous state; action for %s will be run", hook.name)
         else:
             log.debug("No change in path %s for hook %s", hook.path, hook.name)
-            shelf[hook.name + '|' + hook.path] = new_data
+            metadata[hook.name + "|" + hook.path] = new_data
+            JsonFileManager.write(self.dir, 'metadata_db.json', metadata)
             return
 
         log.info("Running action for %s", hook.name)
@@ -626,7 +625,8 @@ class HookProcessor(object):
         if result.returncode:
             log.warn("Action for %s exited with %s; will retry on next iteration", hook.name, result.returncode)
         else:
-            shelf[hook.name + '|' + hook.path] = new_data
+            metadata[hook.name + '|' + hook.path] = new_data
+            JsonFileManager.write(self.dir, 'metadata_db.json', metadata)
         log.debug("Action for %s output: %s", hook.name, result.stdout if result.stdout else '<None>')
 
     def _as_string(self, obj):
