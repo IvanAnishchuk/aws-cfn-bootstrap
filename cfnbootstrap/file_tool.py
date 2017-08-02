@@ -117,6 +117,12 @@ class FileTool(object):
                 else:
                     raise ToolError("Parent directory %s exists and is a file" % parent)
 
+            currentFileExists = False
+            # if file exists, copy its current mode
+            if os.path.isfile(filename):
+                currentFileExists = True
+                currentFileMode = stat.S_IMODE(os.stat(filename).st_mode)
+
             with self.backup(filename, files_changed):
                 if file_is_link:
                     log.debug("%s is specified as a symbolic link to %s", filename, attribs['content'])
@@ -135,7 +141,16 @@ class FileTool(object):
                     log.debug("Setting mode for %s to %s", filename, attribs["mode"])
                     os.chmod(filename, stat.S_IMODE(int(attribs["mode"], 8)))
                 else:
-                    log.debug("No mode specified for %s", filename)
+                    if currentFileExists:
+                        log.debug("No mode specified for %s. Setting permissions of the existing file: %s.", filename, oct(currentFileMode))
+                        os.chmod(filename, currentFileMode)
+                    else:
+                        # get attributes that the file was just created
+                        currentFileMode = stat.S_IMODE(os.stat(filename).st_mode)
+                        # filter the curent mode by giving up others writable
+                        currentFileMode = currentFileMode & 0775
+                        log.debug("No mode specified for %s. The file will be created with the mode: %s", filename, oct(currentFileMode))
+                        os.chmod(filename, currentFileMode)
 
                 security.set_owner_and_group(filename, attribs.get("owner"), attribs.get("group"))
 

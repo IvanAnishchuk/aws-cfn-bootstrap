@@ -19,15 +19,23 @@
 import os
 import copy
 import collections
+import stat
 
 try:
     import simplejson as json
 except ImportError:
     import json
 
+def setSafeMode(directory, filename):
+    fullname = os.path.join(directory, filename)
+    currentFileMode = stat.S_IMODE(os.stat(fullname).st_mode)
+    currentFileMode = currentFileMode & 0600
+    os.chmod(fullname, currentFileMode)
+
 def create(directory, filename):
     if not os.path.isfile(os.path.join(directory, filename)):
         open(os.path.join(directory, filename), 'w').close()
+    setSafeMode(directory, filename)
     
 def read(directory, filename):
     try:
@@ -40,6 +48,7 @@ def read(directory, filename):
 def write(directory, filename, metadata):
     with open(os.path.join(directory, filename), 'w') as fp:
         json.dump(metadata, fp)
+    setSafeMode(directory, filename)
 
 # JSON doesn't serialize deques and user defined types. Defining here our own conversion.
 class Converter():

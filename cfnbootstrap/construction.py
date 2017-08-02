@@ -64,7 +64,7 @@ class WorkLog(object):
             self._json_db_dir = '/var/lib/cfn-init'
 
         if not os.path.isdir(self._json_db_dir) and not os.path.exists(self._json_db_dir):
-            os.makedirs(self._json_db_dir, 0600)
+            os.makedirs(self._json_db_dir, 0700)
 
         if not os.path.isdir(self._json_db_dir):
             print >> sys.stderr, "Could not create %s to store the work log" % self._json_db_dir

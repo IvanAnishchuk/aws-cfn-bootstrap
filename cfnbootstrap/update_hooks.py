@@ -338,7 +338,7 @@ class CmdProcessor(object):
         if not os.path.isdir(self.storage_dir):
             log.debug("Creating %s", self.storage_dir)
             try:
-                os.makedirs(self.storage_dir)
+                os.makedirs(self.storage_dir, 0700)
             except OSError:
                 log.warn("Could not create %s; using temporary directory", self.storage_dir)
                 self.storage_dir = tempfile.mkdtemp()
@@ -569,7 +569,7 @@ class HookProcessor(object):
         if not os.path.isdir(self.dir):
             log.debug("Creating %s", self.dir)
             try:
-                os.makedirs(self.dir)
+                os.makedirs(self.dir, 0700)
             except OSError:
                 log.warn("Could not create %s; using temporary directory", self.dir)
                 self.dir = tempfile.mkdtemp()
