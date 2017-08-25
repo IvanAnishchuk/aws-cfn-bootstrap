@@ -17,6 +17,8 @@ import logging.config
 import os.path
 import sys
 import StringIO
+import stat
+import os
 
 class NullHandler(logging.Handler):
     def emit(self, record):
@@ -89,6 +91,12 @@ datefmt=
 class=logging.Formatter
 """
 
+def resetGroupWorldWritable(fullname):
+    current_file_mode = stat.S_IMODE(os.stat(fullname).st_mode)
+    # reset group and world writable attribute
+    current_file_mode = current_file_mode & 0755
+    os.chmod(fullname, current_file_mode)
+
 def _getLogFile(log_dir, filename):
     if log_dir:
         return os.path.join(log_dir, filename)
@@ -129,6 +137,12 @@ def configureLogging(level='INFO', quiet=False, filename='cfn-init.log', log_dir
 
     try:
         logging.config.fileConfig(StringIO.StringIO(_config), config)
+        # make sure any generated log files are not world or group writable
+        resetGroupWorldWritable(output_file)
+        if wire_log:
+            resetGroupWorldWritable(wire_file)
+        if cmd_log:
+            resetGroupWorldWritable(cmd_file)
     except IOError:
         config['all_handlers'] = 'tostderr'
         config['root_handler'] = 'tostderr'

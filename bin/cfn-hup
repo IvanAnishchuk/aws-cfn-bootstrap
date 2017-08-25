@@ -19,6 +19,7 @@ import signal
 import cfnbootstrap
 from cfnbootstrap import update_hooks, util
 from optparse import OptionParser
+import ConfigParser
 import logging
 import os
 import threading
@@ -28,6 +29,16 @@ try:
     import simplejson as json
 except ImportError:
     import json
+
+# throws: ValueError, ConfigParser.NoOptionError
+def get_umask_from_conf(config):
+        octal_as_string = config.get('main', 'umask')
+        # interpret the number as octal even if it's not specified as octal (just like the Linux umask command)
+        safe_octal_as_string = '0' + octal_as_string
+        ret_val = int(safe_octal_as_string, 8)
+        if (ret_val > 0777) or (ret_val < 0):
+            raise ValueError("Octal number for umask out of range: %s" % oct(ret_val))
+        return ret_val
 
 if os.name == 'nt':
     default_confdir = os.path.expandvars('${SystemDrive}\cfn')
@@ -47,9 +58,11 @@ parser.add_option("-v", "--verbose", help="Enables verbose logging",
 
 fatal_event = threading.Event()
 
-def main():
-    cfnbootstrap.configureLogging("DEBUG", filename='cfn-hup.log')
+# with configureLogging in this place (that is: outside main) cfn-hup.log won't get the benefit of umask setting, but
+# we take additional care of disabling group and world writable permissions at the creation place
+cfnbootstrap.configureLogging("DEBUG", filename='cfn-hup.log')
 
+def parse_config_file():
     if not options.config_path:
         logging.error("Error: A configuration path must be specified")
         parser.print_help(sys.stderr)
@@ -60,10 +73,14 @@ def main():
         sys.exit(1)
 
     try:
-        main_config, processor, cmd_processor = update_hooks.parse_config(options.config_path)
+        return update_hooks.parse_config(options.config_path)
     except ValueError, e:
         logging.error("Error: %s", str(e))
         sys.exit(1)
+
+
+def main():
+    main_config, processor, cmd_processor = parse_config_file()
 
     verbose = options.verbose or main_config.has_option('main', 'verbose') and main_config.getboolean('main', 'verbose')
     cfnbootstrap.configureLogging("DEBUG" if verbose else "INFO", filename='cfn-hup.log')
@@ -181,8 +198,20 @@ else:
         logging.info("Shutting down cfn-hup")
         fatal_event.set()
 
+    # Default value to (temporary) maintain backwards compatibility; it will be changed to: 0022 soon
+    umask_parameter = 0
+    try:
+        main_config, processor, cmd_processor = parse_config_file()
+        umask_parameter = get_umask_from_conf(main_config)
+        logging.info("Setting umask value to: %s", oct(umask_parameter))
+    except ValueError, e:
+        logging.error("Invalid octal value specified for umask in config file: %s", str(e))
+        sys.exit(1)
+    except ConfigParser.NoOptionError:
+        logging.info("No umask value specified in config file. Using the default one: %s", oct(umask_parameter))
+
     with daemon.DaemonContext(pidfile=pidlockfile.TimeoutPIDLockFile('/var/run/cfn-hup.pid', 300),
-                              signal_map={signal.SIGTERM : kill}):
+                              signal_map={signal.SIGTERM : kill}, umask=umask_parameter):
         try:
             main()
         except Exception, e:
