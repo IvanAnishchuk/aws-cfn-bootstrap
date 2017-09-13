@@ -198,8 +198,8 @@ else:
         logging.info("Shutting down cfn-hup")
         fatal_event.set()
 
-    # Default value to (temporary) maintain backwards compatibility; it will be changed to: 0022 soon
-    umask_parameter = 0
+    # Default umask value (mask out world and group writable)
+    umask_parameter = 0022
     try:
         main_config, processor, cmd_processor = parse_config_file()
         umask_parameter = get_umask_from_conf(main_config)
