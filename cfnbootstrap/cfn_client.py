@@ -51,7 +51,8 @@ class CloudFormationClient(aws_client.Client):
     """
 
     _apiVersion = "2010-05-15"
-    _endpoints = { "cn-north-1": "https://cloudformation.cn-north-1.amazonaws.com.cn" }
+    _endpoints = { "cn-north-1": "https://cloudformation.cn-north-1.amazonaws.com.cn",
+                   "cn-northwest-1": "https://cloudformation.cn-northwest-1.amazonaws.com.cn"}
 
     def __init__(self, credentials, url=None, region='us-east-1', proxyinfo=None):
 

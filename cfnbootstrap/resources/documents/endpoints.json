@@ -23,7 +23,8 @@
                 { "Region": "ap-northeast-2", "Hostname": "s3.ap-northeast-2.amazonaws.com" },
                 { "Region": "sa-east-1", "Hostname": "s3-sa-east-1.amazonaws.com" },
                 { "Region": "us-gov-west-1", "Hostname": "s3-us-gov-west-1.amazonaws.com" },
-                { "Region": "cn-north-1", "Hostname": "s3.cn-north-1.amazonaws.com.cn" }
+                { "Region": "cn-north-1", "Hostname": "s3.cn-north-1.amazonaws.com.cn" },
+                { "Region": "cn-northwest-1", "Hostname": "s3.cn-northwest-1.amazonaws.com.cn" }
             ]
         },
         "AmazonSQS": {
@@ -43,7 +44,8 @@
                 { "Region": "ap-northeast-2", "Hostname": "sqs.ap-northeast-2.amazonaws.com" },
                 { "Region": "sa-east-1", "Hostname": "sa-east-1.queue.amazonaws.com" },
                 { "Region": "us-gov-west-1", "Hostname": "us-gov-west-1.queue.amazonaws.com" },
-                { "Region": "cn-north-1", "Hostname": "cn-north-1.queue.amazonaws.com.cn" }
+                { "Region": "cn-north-1", "Hostname": "cn-north-1.queue.amazonaws.com.cn" },
+                { "Region": "cn-northwest-1", "Hostname": "sqs.cn-northwest-1.amazonaws.com.cn" }
             ]
         }
     }

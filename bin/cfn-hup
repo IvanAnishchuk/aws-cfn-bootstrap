@@ -180,7 +180,7 @@ def main():
 if options.no_daemon:
     main()
 elif os.name == 'nt':
-    logging.error("Error: cfn-hup cannot be run directly in daemon mode on Windows")
+    print >> sys.stderr, "Error: cfn-hup cannot be run directly in daemon mode on Windows"
     sys.exit(1)
 else:
     try:

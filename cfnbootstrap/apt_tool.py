@@ -16,11 +16,12 @@
 
 from cfnbootstrap.util import ProcessHelper
 import logging
+from cfn_logging import CfnLogger
 import os
 from cfnbootstrap.construction_errors import ToolError
 import subprocess
 
-log = logging.getLogger("cfn.init")
+log = CfnLogger(logging.getLogger("cfn.init"))
 
 class AptTool(object):
     """

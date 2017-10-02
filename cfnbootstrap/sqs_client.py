@@ -76,7 +76,7 @@ class SQSClient(aws_client.Client):
         if m:
             for endpoint in endpoint_tool.get_endpoints_for_service("AmazonSQS"):
                 if endpoint.region == m.group(1):
-                    return 'https://%s%s' % (endpoint.hostname if endpoint.region != "cn-north-1" else endpoint.hostname[:-3], m.group(2))
+                    return 'https://%s%s' % (endpoint.hostname if not endpoint.region.startswith("cn-") else endpoint.hostname[:-3], m.group(2))
         return unparsed_url
 
     @classmethod

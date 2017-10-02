@@ -74,7 +74,7 @@ def parse_config(config_path):
     files_read = hooks_config.read([os.path.join(config_path, 'hooks.conf')] + additional_files)
 
     if not files_read:
-        raise ValueError("No hook configurations found at %s or %s.", os.path.join(config_path, 'hooks.conf'), additional_hooks_path)
+        raise ValueError("No hook configurations found at %s or %s." % (os.path.join(config_path, 'hooks.conf'), additional_hooks_path))
 
     hooks = []
     cmd_hooks = []
@@ -576,6 +576,7 @@ class HookProcessor(object):
         JsonFileManager.create(self.dir, 'metadata_db.json')
         self.client = client
         self.stack_name = stack_name
+        self._jsonConverter = JsonFileManager.Converter([])
 
     def process(self):
         metadata = JsonFileManager.read(self.dir, 'metadata_db.json')
@@ -594,7 +595,7 @@ class HookProcessor(object):
         except InFlightStatusError:
             return
 
-        old_data = metadata.get(hook.name + "|" + hook.path, None)
+        old_data = self._jsonConverter.deserialize(metadata.get(hook.name + "|" + hook.path, None))
 
         if 'post.add' in hook.triggers and not old_data and new_data:
             log.info("Previous state not found; action for %s will be run", hook.name)
@@ -604,7 +605,7 @@ class HookProcessor(object):
             log.info("Data has changed from previous state; action for %s will be run", hook.name)
         else:
             log.debug("No change in path %s for hook %s", hook.path, hook.name)
-            metadata[hook.name + "|" + hook.path] = new_data
+            metadata[hook.name + "|" + hook.path] = self._jsonConverter.serialize(new_data)
             JsonFileManager.write(self.dir, 'metadata_db.json', metadata)
             return
 
@@ -625,7 +626,7 @@ class HookProcessor(object):
         if result.returncode:
             log.warn("Action for %s exited with %s; will retry on next iteration", hook.name, result.returncode)
         else:
-            metadata[hook.name + '|' + hook.path] = new_data
+            metadata[hook.name + '|' + hook.path] = self._jsonConverter.serialize(new_data)
             JsonFileManager.write(self.dir, 'metadata_db.json', metadata)
         log.debug("Action for %s output: %s", hook.name, result.stdout if result.stdout else '<None>')
 

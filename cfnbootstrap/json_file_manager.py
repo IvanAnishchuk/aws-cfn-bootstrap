@@ -20,6 +20,9 @@ import os
 import copy
 import collections
 import stat
+import time
+import datetime
+import decimal
 
 try:
     import simplejson as json
@@ -55,18 +58,25 @@ class Converter():
     def __init__(self, userDefinedTypes):
         # Markers for the manually serialized types
         # collection.deque is treated specially
+        # datetime.datetime is also treated specially
         # User defined types are all treated uniformly
         self._userDefinedTypes = userDefinedTypes
         self._deque_marker = '_deque: special_serialization: not_regular_json_'
+        self._datetime_marker = '_datetime: special_serialization: not_regular_json_'
         self._markers = {}
         for t in self._userDefinedTypes:
             self._markers[t] = '_' + t.__name__ + ': special_serialization: not_regular_json_'
+        # The format used to serialize datetime
+        self._datetime_format = '"%Y-%m-%dT%H:%M:%S.%f"'
 
     def serialize(self, data):
         raw = copy.deepcopy(data)
         if isinstance(raw, collections.deque):
             retval = [self.serialize(v) for v in raw]
             return {self._deque_marker : retval}
+        elif isinstance(raw, datetime.datetime):
+            retval = self._datetime2str(raw)
+            return {self._datetime_marker : retval}
         else:
             for t in self._userDefinedTypes:
                 if isinstance(raw, t):
@@ -80,10 +90,19 @@ class Converter():
         if self._deque_marker in serialized:
             serialized = serialized[self._deque_marker]
             return collections.deque([self.deserialize(v) for v in serialized])
+        elif self._datetime_marker in serialized:
+            serialized = serialized[self._datetime_marker]
+            return self._str2datetime(serialized)
         else:
             for t in self._userDefinedTypes:
                 if self._markers[t] in serialized:
                     serialized = serialized[self._markers[t]]
                     return t.from_json(serialized)
             return serialized
+
+    def _datetime2str(self, d):
+        return unicode(d.strftime(self._datetime_format))
+
+    def _str2datetime(self, t):
+        return datetime.datetime.strptime(t, self._datetime_format)
 
