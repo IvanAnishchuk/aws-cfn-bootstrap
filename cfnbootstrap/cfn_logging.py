@@ -59,5 +59,8 @@ def to_unicode_filter_dict(a_key, a_dictionary, a_filter):
 
 # kwargs['extra'] might also have a non-Unicode encoding
 def to_unicode_kwargs_dictionary(a_dictionary):
-    return {x:to_unicode_filter_dict(x, a_dictionary, 'extra') for x in a_dictionary.keys()}
+    retval = {}
+    for x in a_dictionary.keys():
+        retval[x] = to_unicode_filter_dict(x, a_dictionary, 'extra')
+    return retval
 
