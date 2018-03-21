@@ -153,16 +153,16 @@ def retry_on_failure(max_tries = 5, http_error_extractor=_extract_http_error):
         def _retry(*args, **kwargs):
             sleeper = Sleeper()
             durations = exponential_backoff(max_tries)
-            for i in durations:
-                if i > 0:
-                    log.debug("Sleeping for %f seconds before retrying", i)
-                    sleeper.sleep(i)
+            for duration in durations:
+                if duration > 0:
+                    log.debug("Sleeping for %f seconds before retrying", duration)
+                    sleeper.sleep(duration)
 
                 try:
                     return f(*args, **kwargs)
                 except SSLError, e:
                     log.exception("SSLError")
-                    raise RemoteError(None, str(e), retry_mode='TERMINAL')
+                    last_error = RemoteError(None, str(e))
                 except ChecksumError, e:
                     log.exception("Checksum mismatch")
                     last_error = RemoteError(None, str(e))

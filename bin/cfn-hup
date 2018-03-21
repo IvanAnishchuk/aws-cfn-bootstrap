@@ -79,12 +79,7 @@ def parse_config_file():
         sys.exit(1)
 
 
-def main():
-    main_config, processor, cmd_processor = parse_config_file()
-
-    verbose = options.verbose or main_config.has_option('main', 'verbose') and main_config.getboolean('main', 'verbose')
-    cfnbootstrap.configureLogging("DEBUG" if verbose else "INFO", filename='cfn-hup.log')
-
+def main(main_config, processor, cmd_processor):
     if options.no_daemon:
         if processor:
             processor.process()
@@ -177,8 +172,12 @@ def main():
 
         sys.exit(0)
 
+main_config, processor, cmd_processor = parse_config_file()
+
 if options.no_daemon:
-    main()
+    verbose = options.verbose or main_config.has_option('main', 'verbose') and main_config.getboolean('main', 'verbose')
+    cfnbootstrap.configureLogging("DEBUG" if verbose else "INFO", filename='cfn-hup.log')
+    main(main_config, processor, cmd_processor)
 elif os.name == 'nt':
     print >> sys.stderr, "Error: cfn-hup cannot be run directly in daemon mode on Windows"
     sys.exit(1)
@@ -201,7 +200,6 @@ else:
     # Default umask value (mask out world and group writable)
     umask_parameter = 0022
     try:
-        main_config, processor, cmd_processor = parse_config_file()
         umask_parameter = get_umask_from_conf(main_config)
         logging.info("Setting umask value to: %s", oct(umask_parameter))
     except ValueError, e:
@@ -210,10 +208,15 @@ else:
     except ConfigParser.NoOptionError:
         logging.info("No umask value specified in config file. Using the default one: %s", oct(umask_parameter))
 
+    # Close root logger before starting up daemon to avoid collision
+    logging.getLogger().handlers[0].close()
+
     with daemon.DaemonContext(pidfile=pidlockfile.TimeoutPIDLockFile('/var/run/cfn-hup.pid', 300),
                               signal_map={signal.SIGTERM : kill}, umask=umask_parameter):
         try:
-            main()
+            verbose = options.verbose or main_config.has_option('main', 'verbose') and main_config.getboolean('main', 'verbose')
+            cfnbootstrap.configureLogging("DEBUG" if verbose else "INFO", filename='cfn-hup.log')
+            main(main_config, processor, cmd_processor)
         except Exception, e:
             logging.exception("Unhandled exception: %s", str(e))
             sys.exit(1)
