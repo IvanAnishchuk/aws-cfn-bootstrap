@@ -33,6 +33,9 @@ import operator
 import re
 import urllib
 import urlparse
+import public_constants
+import sys
+import platform
 
 log = logging.getLogger('cfn.client')
 
@@ -224,7 +227,8 @@ class Client(object):
 
     def _make_request(self, verb, base_url, params, headers, timeout=None):
         headers = dict(headers) if headers else {}
-        headers['User-Agent'] = 'CloudFormation Tools'
+        headers['User-Agent'] = self._construct_user_agent()
+
         return util.check_status(api.request(verb, base_url,
                            **util.req_opts({
                             'data' : Client.construct_query(params) if verb=='POST' else dict(),
@@ -233,3 +237,16 @@ class Client(object):
                             'proxies' : self._proxyinfo,
                             'timeout' : timeout
                            })))
+
+    def _construct_user_agent(self):
+        # User-agent format: "CfnTools/[version] (system information) python/[version]"
+        # In case it fails to get any part of the string above,
+        # it defaults back to the old string - "CloudFormation Tools"
+        try:
+            bootstrapper_version = public_constants.get_version()
+            python_version = platform.python_version()
+            system_info = platform.platform()
+            return 'CfnTools/' + str(bootstrapper_version) + ' (' + system_info + ')' +' python/' + python_version
+        except Exception as e:
+            log.debug("Constructing user agent failed with error message: " + str(e))
+            return "CloudFormation Tools"

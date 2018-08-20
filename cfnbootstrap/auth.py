@@ -35,7 +35,7 @@ _SECURITY_TOKEN_HEADER = 'x-amz-security-token'
 log = logging.getLogger("cfn.init")
 
 def _extract_bucket_from_url(unparsed_url):
-    endpoint = _get_endpoint_for_url(unparsed_url)
+    endpoint = endpoint_tool.get_endpoint_for_url("AmazonS3", unparsed_url)
     if endpoint is None:
         # Not an S3 URL, skip
         return None
@@ -49,12 +49,6 @@ def _extract_bucket_from_url(unparsed_url):
         # Subdomain-style S3 URL
         # Remove the trailing dot if it exists
         return bucket.rstrip('.')
-
-def _get_endpoint_for_url(unparsed_url):
-    for endpoint in endpoint_tool.get_endpoints_for_service("AmazonS3"):
-        if endpoint.matches_url(unparsed_url):
-            return endpoint
-    return None
 
 class S3Signer(object):
 
@@ -105,7 +99,7 @@ class S3Signer(object):
 
         region = self._region
         if not region:
-            endpoint = _get_endpoint_for_url(full_url)
+            endpoint = endpoint_tool.get_endpoint_for_url("AmazonS3", full_url)
             if endpoint.is_default:
                 log.warn('Falling back to Signature Version 2 as no region was specified in S3 URL')
                 return S3V2Signer(self._creds).sign(req)
@@ -213,7 +207,7 @@ class S3V2Signer(object):
 
     def _canonicalize_resource(self, req):
         unparsed_url = req.full_url if hasattr(req, 'full_url') else req.url
-        endpoint = _get_endpoint_for_url(unparsed_url)
+        endpoint = endpoint_tool.get_endpoint_for_url("AmazonS3", unparsed_url)
         bucket = endpoint.get_subdomain_prefix(unparsed_url)
         url = urlparse.urlparse(unparsed_url)
         if not bucket:
